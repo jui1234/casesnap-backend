@@ -35,7 +35,9 @@ const isValidDateOrNull = (d) => d === null || (d instanceof Date && !Number.isN
 
 const CASE_EXCEL_SHEET = 'Cases';
 const CASE_COURT_PREMISES_ENUM = Case.schema?.path('courtPremises')?.enumValues || [];
-// One row can represent one case-client link. If caseNumber is provided, duplicate caseNumber rows are merged into one case with multiple clients.
+// One row can represent one case-client link.
+// Merge rows by caseNumber (trimmed) when provided; duplicate caseNumbers become one case with multiple clients.
+// Leave caseNumber empty to create one case per row; caseNumber and internal case _id are auto-generated when omitted.
 // For client resolution, provide clientId OR clientPhone OR clientEmail. If none match and you want auto-create,
 // provide required client creation fields.
 const CASE_EXCEL_HEADERS_V2 = [
@@ -59,17 +61,23 @@ const CASE_EXCEL_HEADERS_V2 = [
     'clientFees'
 ];
 
-// Backward compatible: older templates included caseNumber as first column.
+// Template + export + preferred import layout: optional caseNumber first; empty => auto-generated caseNumber.
 const CASE_EXCEL_HEADERS_V1 = ['caseNumber', ...CASE_EXCEL_HEADERS_V2];
 
-function parseCaseExcel(buffer, { sheetName, maxRows } = {}) {
-    const v2 = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_V2, maxRows });
-    if (v2.ok) return { ...v2, version: 2 };
+// Older exports included caseId column; sheet still parses but caseId values are ignored (case _id is always auto-assigned).
+const CASE_EXCEL_HEADERS_LEGACY_EXPORT_WITH_CASE_ID = ['caseId', 'caseNumber', ...CASE_EXCEL_HEADERS_V2];
 
+function parseCaseExcel(buffer, { sheetName, maxRows } = {}) {
     const v1 = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_V1, maxRows });
     if (v1.ok) return { ...v1, version: 1 };
 
-    return v2; // return v2 error by default
+    const v2 = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_V2, maxRows });
+    if (v2.ok) return { ...v2, version: 2 };
+
+    const legacy = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_LEGACY_EXPORT_WITH_CASE_ID, maxRows });
+    if (legacy.ok) return { ...legacy, version: 'legacy-export' };
+
+    return v1; // preferred layout error message
 }
 
 /**
@@ -582,7 +590,7 @@ exports.unarchiveCase = asyncHandler(async (req, res, next) => {
 exports.downloadCaseExcelTemplate = asyncHandler(async (req, res) => {
     const buffer = writeExcelToBuffer({
         sheetName: CASE_EXCEL_SHEET,
-        headers: CASE_EXCEL_HEADERS_V2,
+        headers: CASE_EXCEL_HEADERS_V1,
         rows: []
     });
 
@@ -781,8 +789,10 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             }
         }
 
+        const caseErrCtx = { ...(caseNumber ? { caseNumber } : {}) };
+
         if (rowIssues.length > 0) {
-            errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: rowIssues });
+            errors.push({ row: first.rowNumber, ...caseErrCtx, errors: rowIssues });
             skippedCases++;
             continue;
         }
@@ -804,7 +814,7 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             if (clientId) {
                 const cl = await Client.findOne({ _id: clientId, organization: organizationId, deletedAt: null }).select('_id').lean();
                 if (!cl) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientId "${clientId}" not found in your organization`] });
+                    errors.push({ row: r, ...caseErrCtx, errors: [`clientId "${clientId}" not found in your organization`] });
                     continue;
                 }
                 resolvedClientId = cl._id.toString();
@@ -820,18 +830,18 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                     : [];
 
                 if (byPhone.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                    errors.push({ row: r, ...caseErrCtx, errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
                     continue;
                 }
                 if (byEmail.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                    errors.push({ row: r, ...caseErrCtx, errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
                     continue;
                 }
 
                 const phoneId = byPhone[0]?._id?.toString();
                 const emailId = byEmail[0]?._id?.toString();
                 if (phoneId && emailId && phoneId !== emailId) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
+                    errors.push({ row: r, ...caseErrCtx, errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
                     continue;
                 }
 
@@ -862,7 +872,7 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                 if (fees === undefined || Number.isNaN(fees)) clientIssues.push('clientFees is required to create client and must be a number');
 
                 if (clientIssues.length > 0) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: clientIssues });
+                    errors.push({ row: r, ...caseErrCtx, errors: clientIssues });
                     continue;
                 }
 
@@ -874,17 +884,17 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                     ? await Client.find({ organization: organizationId, deletedAt: null, email: clientEmail }).select('_id').lean()
                     : [];
                 if (byPhone.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                    errors.push({ row: r, ...caseErrCtx, errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
                     continue;
                 }
                 if (byEmail.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                    errors.push({ row: r, ...caseErrCtx, errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
                     continue;
                 }
                 const phoneId = byPhone[0]?._id?.toString();
                 const emailId = byEmail[0]?._id?.toString();
                 if (phoneId && emailId && phoneId !== emailId) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
+                    errors.push({ row: r, ...caseErrCtx, errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
                     continue;
                 }
                 if (phoneId || emailId) {
@@ -913,7 +923,7 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                     resolvedClientId = created._id.toString();
                     createdClients++;
                 } catch (e) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: formatMongooseErrorForUser(e) });
+                    errors.push({ row: r, ...caseErrCtx, errors: formatMongooseErrorForUser(e) });
                     continue;
                 }
                 }
@@ -927,14 +937,14 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
 
         const effectiveClientCount = clientCount === undefined ? clientIds.length : (Number.isNaN(clientCount) ? NaN : clientCount);
         if (Number.isNaN(effectiveClientCount)) {
-            errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: ['clientCount must be a number'] });
+            errors.push({ row: first.rowNumber, ...caseErrCtx, errors: ['clientCount must be a number'] });
             skippedCases++;
             continue;
         }
         if (clientIds.length > effectiveClientCount) {
             errors.push({
                 row: first.rowNumber,
-                ...(caseNumber ? { caseNumber } : {}),
+                ...caseErrCtx,
                 errors: [`Cannot assign more than ${effectiveClientCount} client(s). Found ${clientIds.length} client rows for this caseNumber.`]
             });
             skippedCases++;
@@ -958,7 +968,7 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             });
             createdCases++;
         } catch (e) {
-            errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: formatMongooseErrorForUser(e) });
+            errors.push({ row: first.rowNumber, ...caseErrCtx, errors: formatMongooseErrorForUser(e) });
             skippedCases++;
         }
     }
@@ -1212,6 +1222,8 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
             }
         }
 
+        const casePreviewErrCtx = { ...(caseNumber ? { caseNumber } : {}) };
+
         const clientPreviews = [];
         const resolvedClientIds = new Set();
 
@@ -1328,9 +1340,9 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
         }
 
         const willCreateCase = caseIssues.length === 0 && clientPreviews.every((cp) => (cp.issues || []).length === 0);
-        if (caseIssues.length > 0) errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: caseIssues });
+        if (caseIssues.length > 0) errors.push({ row: first.rowNumber, ...casePreviewErrCtx, errors: caseIssues });
         for (const cp of clientPreviews) {
-            if (cp.issues && cp.issues.length > 0) errors.push({ row: cp.row, ...(caseNumber ? { caseNumber } : {}), errors: cp.issues });
+            if (cp.issues && cp.issues.length > 0) errors.push({ row: cp.row, ...casePreviewErrCtx, errors: cp.issues });
         }
 
         preview.push({
