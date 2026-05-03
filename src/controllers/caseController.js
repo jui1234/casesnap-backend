@@ -1,6 +1,8 @@
 // controllers/caseController.js
 // Case CRUD operations with RBAC
 
+const mongoose = require('mongoose');
+const { generateClientId } = require('../utils/idGenerator');
 const Case = require('../models/Case');
 const Client = require('../models/Client');
 const Notification = require('../models/Notification');
@@ -78,6 +80,213 @@ function parseCaseExcel(buffer, { sheetName, maxRows } = {}) {
     if (legacy.ok) return { ...legacy, version: 'legacy-export' };
 
     return v1; // preferred layout error message
+}
+
+/**
+ * Same caseNumber can span multiple rows (one per client). Merged cells / templates often leave
+ * caseType, partyName, etc. blank on continuation rows — only the first physical row has values.
+ * Take the first non-empty value across the group so validation matches what users see in Excel.
+ */
+function firstNonEmptyCaseExcelField(rows, field) {
+    for (const rr of rows) {
+        const s = toSafeString(rr.data[field]).trim();
+        if (s) return s;
+    }
+    return '';
+}
+
+function firstDefinedClientCountInCaseGroup(rows) {
+    for (const rr of rows) {
+        const n = toOptionalNumber(rr.data.clientCount);
+        if (n !== undefined && !Number.isNaN(n)) return n;
+    }
+    return undefined;
+}
+
+function isStrictObjectIdString(id) {
+    return mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === String(id);
+}
+
+/** Collect distinct keys from parsed Excel rows for batched DB lookups (preview + import). */
+function collectCaseExcelLookupKeys(parsedRows) {
+    const caseNumbers = new Set();
+    const clientIdStrings = new Set();
+    const phones = new Set();
+    const emails = new Set();
+
+    for (const row of parsedRows) {
+        const d = row.data;
+        const cn = toSafeString(d.caseNumber).trim();
+        if (cn) caseNumbers.add(cn);
+
+        const cid = toSafeString(d.clientId);
+        if (cid) clientIdStrings.add(cid);
+
+        const clientPhoneRaw = toSafeString(d.clientPhone);
+        const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
+        const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+        if (clientPhone) phones.add(clientPhone);
+        if (clientEmail) emails.add(clientEmail);
+    }
+
+    return { caseNumbers, clientIdStrings, phones, emails };
+}
+
+/**
+ * Load existing cases/clients referenced by the sheet in a few queries (avoids N+1 per row).
+ * Import should call `addCreatedClientToCaseExcelLookups` after each Client.create so later rows resolve.
+ */
+async function loadCaseExcelImportLookups(organizationId, parsedRows) {
+    const { caseNumbers, clientIdStrings, phones, emails } = collectCaseExcelLookupKeys(parsedRows);
+
+    const existingCaseNumbers = new Set();
+    const clientById = new Map();
+    const clientsByPhone = new Map();
+    const clientsByEmail = new Map();
+
+    const caseNumArr = [...caseNumbers];
+    const phoneArr = [...phones];
+    const emailArr = [...emails];
+
+    const objectIds = [];
+    for (const s of clientIdStrings) {
+        if (isStrictObjectIdString(s)) objectIds.push(new mongoose.Types.ObjectId(s));
+    }
+
+    const orConds = [];
+    if (phoneArr.length) orConds.push({ phone: { $in: phoneArr } });
+    if (emailArr.length) orConds.push({ email: { $in: emailArr } });
+
+    const [caseDocs, clientByIdDocs, phoneEmailClients] = await Promise.all([
+        caseNumArr.length
+            ? Case.find({
+                organization: organizationId,
+                deletedAt: null,
+                caseNumber: { $in: caseNumArr }
+            })
+                .select('_id caseNumber')
+                .lean()
+            : Promise.resolve([]),
+        objectIds.length
+            ? Client.find({
+                _id: { $in: objectIds },
+                organization: organizationId,
+                deletedAt: null
+            })
+                .select('_id')
+                .lean()
+            : Promise.resolve([]),
+        orConds.length
+            ? Client.find({
+                organization: organizationId,
+                deletedAt: null,
+                $or: orConds
+            })
+                .select('_id phone email')
+                .lean()
+            : Promise.resolve([])
+    ]);
+
+    for (const c of caseDocs) {
+        if (c.caseNumber != null && String(c.caseNumber).trim()) existingCaseNumbers.add(String(c.caseNumber).trim());
+    }
+    for (const cl of clientByIdDocs) {
+        clientById.set(cl._id.toString(), cl);
+    }
+    for (const cl of phoneEmailClients) {
+        if (cl.phone != null && cl.phone !== '') {
+            const key = String(cl.phone).replace(/\D/g, '');
+            if (key) {
+                if (!clientsByPhone.has(key)) clientsByPhone.set(key, []);
+                clientsByPhone.get(key).push(cl);
+            }
+        }
+        if (cl.email != null && String(cl.email).trim()) {
+            const em = String(cl.email).toLowerCase();
+            if (!clientsByEmail.has(em)) clientsByEmail.set(em, []);
+            clientsByEmail.get(em).push(cl);
+        }
+    }
+
+    return { existingCaseNumbers, clientById, clientsByPhone, clientsByEmail };
+}
+
+function addCreatedClientToCaseExcelLookups(lookups, doc) {
+    const id = doc._id.toString();
+    lookups.clientById.set(id, { _id: doc._id });
+    if (doc.phone != null && doc.phone !== '') {
+        const key = String(doc.phone).replace(/\D/g, '');
+        if (key) {
+            if (!lookups.clientsByPhone.has(key)) lookups.clientsByPhone.set(key, []);
+            lookups.clientsByPhone.get(key).push({ _id: doc._id });
+        }
+    }
+    if (doc.email != null && String(doc.email).trim()) {
+        const em = String(doc.email).toLowerCase();
+        if (!lookups.clientsByEmail.has(em)) lookups.clientsByEmail.set(em, []);
+        lookups.clientsByEmail.get(em).push({ _id: doc._id });
+    }
+}
+
+/** Undo addCreatedClientToCaseExcelLookups when a case group is skipped after staging new clients. */
+function removePendingClientFromCaseExcelLookups(lookups, doc) {
+    const idStr = doc._id.toString();
+    lookups.clientById.delete(idStr);
+    if (doc.phone != null && doc.phone !== '') {
+        const key = String(doc.phone).replace(/\D/g, '');
+        if (key && lookups.clientsByPhone.has(key)) {
+            const arr = lookups.clientsByPhone.get(key).filter((c) => c._id.toString() !== idStr);
+            if (arr.length) lookups.clientsByPhone.set(key, arr);
+            else lookups.clientsByPhone.delete(key);
+        }
+    }
+    if (doc.email != null && String(doc.email).trim()) {
+        const em = String(doc.email).toLowerCase();
+        if (lookups.clientsByEmail.has(em)) {
+            const arr = lookups.clientsByEmail.get(em).filter((c) => c._id.toString() !== idStr);
+            if (arr.length) lookups.clientsByEmail.set(em, arr);
+            else lookups.clientsByEmail.delete(em);
+        }
+    }
+}
+
+/** Match clientId or phone/email against preloaded maps (same rules as former per-row queries). */
+function resolveCaseExcelClientFromLookups(d, lookups) {
+    const clientId = toSafeString(d.clientId);
+    const clientPhoneRaw = toSafeString(d.clientPhone);
+    const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
+    const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+    const clientIssues = [];
+
+    if (clientId) {
+        const cl = lookups.clientById.get(clientId);
+        if (!cl) {
+            clientIssues.push(`clientId "${clientId}" not found in your organization`);
+            return { clientPhone, clientPhoneRaw, clientEmail, linkedClientId: null, clientIssues };
+        }
+        return { clientPhone, clientPhoneRaw, clientEmail, linkedClientId: cl._id.toString(), clientIssues };
+    }
+
+    let byPhone = [];
+    let byEmail = [];
+    if (clientPhone) byPhone = lookups.clientsByPhone.get(clientPhone) || [];
+    if (clientEmail) byEmail = lookups.clientsByEmail.get(clientEmail) || [];
+
+    if (byPhone.length > 1) {
+        clientIssues.push(`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`);
+    }
+    if (byEmail.length > 1) {
+        clientIssues.push(`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`);
+    }
+
+    const phoneId = byPhone[0]?._id?.toString();
+    const emailId = byEmail[0]?._id?.toString();
+    if (phoneId && emailId && phoneId !== emailId) {
+        clientIssues.push('clientPhone and clientEmail belong to different clients. Please correct or use clientId.');
+    }
+
+    const linkedClientId = !clientIssues.length ? phoneId || emailId || null : null;
+    return { clientPhone, clientPhoneRaw, clientEmail, linkedClientId, clientIssues };
 }
 
 /**
@@ -746,24 +955,31 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
         groups.get(key).push({ rowNumber: r, data: d });
     }
 
-    let createdCases = 0;
-    let createdClients = 0;
+    const lookups = await loadCaseExcelImportLookups(organizationId, parsed.rows);
+
+    const pendingNewClients = [];
+    const pendingNewCases = [];
     let linkedExistingClients = 0;
     let skippedCases = 0;
+    const createdByStr = userId && userId.toString ? userId.toString() : String(userId);
 
     for (const [caseKey, rows] of groups.entries()) {
         const first = rows[0];
-        const d0 = first.data;
+        const groupPendingClients = [];
         const rowIssues = [];
 
-        const caseNumber = toSafeString(d0.caseNumber).trim();
-        const caseType = toSafeString(d0.caseType).trim();
-        const partyName = toSafeString(d0.partyName).trim();
-        const stage = toSafeString(d0.stage) || undefined;
-        const courtName = toSafeString(d0.courtName) || undefined;
-        const courtPremises = toSafeString(d0.courtPremises) || undefined;
-        const notes = toSafeString(d0.notes) || undefined;
-        const clientCount = toOptionalNumber(d0.clientCount);
+        const caseNumber = firstNonEmptyCaseExcelField(rows, 'caseNumber');
+        const caseType = firstNonEmptyCaseExcelField(rows, 'caseType');
+        const partyName = firstNonEmptyCaseExcelField(rows, 'partyName');
+        const stageRaw = firstNonEmptyCaseExcelField(rows, 'stage');
+        const stage = stageRaw || undefined;
+        const courtNameRaw = firstNonEmptyCaseExcelField(rows, 'courtName');
+        const courtName = courtNameRaw || undefined;
+        const courtPremisesRaw = firstNonEmptyCaseExcelField(rows, 'courtPremises');
+        const courtPremises = courtPremisesRaw || undefined;
+        const notesRaw = firstNonEmptyCaseExcelField(rows, 'notes');
+        const notes = notesRaw || undefined;
+        const clientCount = firstDefinedClientCountInCaseGroup(rows);
 
         if (!caseType) rowIssues.push('caseType is required');
         if (!partyName) rowIssues.push('partyName is required');
@@ -782,11 +998,8 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             rowIssues.push('Only users with case assignee permission can link/create clients during import');
         }
 
-        if (caseNumber) {
-            const existing = await Case.findOne({ organization: organizationId, caseNumber, deletedAt: null }).lean();
-            if (existing) {
-                rowIssues.push('A case with this caseNumber already exists');
-            }
+        if (caseNumber && lookups.existingCaseNumbers.has(caseNumber)) {
+            rowIssues.push('A case with this caseNumber already exists');
         }
 
         const caseErrCtx = { ...(caseNumber ? { caseNumber } : {}) };
@@ -805,47 +1018,24 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             const d = rr.data;
 
             const clientId = toSafeString(d.clientId);
-            const clientPhoneRaw = toSafeString(d.clientPhone);
-            const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
-            const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+            const match = resolveCaseExcelClientFromLookups(d, lookups);
+            const { clientPhone, clientPhoneRaw, clientEmail, linkedClientId: fromLookup, clientIssues: matchIssues } = match;
 
             let resolvedClientId = null;
 
             if (clientId) {
-                const cl = await Client.findOne({ _id: clientId, organization: organizationId, deletedAt: null }).select('_id').lean();
-                if (!cl) {
-                    errors.push({ row: r, ...caseErrCtx, errors: [`clientId "${clientId}" not found in your organization`] });
+                if (matchIssues.length) {
+                    errors.push({ row: r, ...caseErrCtx, errors: matchIssues });
                     continue;
                 }
-                resolvedClientId = cl._id.toString();
+                resolvedClientId = fromLookup;
                 linkedExistingClients++;
             } else if (clientPhone || clientEmail) {
-                // If both phone and email provided, they must resolve to the same client.
-                // If either one matches multiple clients, treat as ambiguity.
-                const byPhone = clientPhone
-                    ? await Client.find({ organization: organizationId, deletedAt: null, phone: clientPhone }).select('_id').lean()
-                    : [];
-                const byEmail = clientEmail
-                    ? await Client.find({ organization: organizationId, deletedAt: null, email: clientEmail }).select('_id').lean()
-                    : [];
-
-                if (byPhone.length > 1) {
-                    errors.push({ row: r, ...caseErrCtx, errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                if (matchIssues.length) {
+                    errors.push({ row: r, ...caseErrCtx, errors: matchIssues });
                     continue;
                 }
-                if (byEmail.length > 1) {
-                    errors.push({ row: r, ...caseErrCtx, errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
-                    continue;
-                }
-
-                const phoneId = byPhone[0]?._id?.toString();
-                const emailId = byEmail[0]?._id?.toString();
-                if (phoneId && emailId && phoneId !== emailId) {
-                    errors.push({ row: r, ...caseErrCtx, errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
-                    continue;
-                }
-
-                resolvedClientId = phoneId || emailId || null;
+                resolvedClientId = fromLookup;
                 if (resolvedClientId) linkedExistingClients++;
             }
 
@@ -877,34 +1067,23 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                 }
 
                 // If phone/email already exists, link instead of creating (but reject ambiguity)
-                const byPhone = clientPhone
-                    ? await Client.find({ organization: organizationId, deletedAt: null, phone: clientPhone }).select('_id').lean()
-                    : [];
-                const byEmail = clientEmail
-                    ? await Client.find({ organization: organizationId, deletedAt: null, email: clientEmail }).select('_id').lean()
-                    : [];
-                if (byPhone.length > 1) {
-                    errors.push({ row: r, ...caseErrCtx, errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                const recheck = resolveCaseExcelClientFromLookups(
+                    { clientPhone: d.clientPhone, clientEmail: d.clientEmail },
+                    lookups
+                );
+                if (recheck.clientIssues.length) {
+                    errors.push({ row: r, ...caseErrCtx, errors: recheck.clientIssues });
                     continue;
                 }
-                if (byEmail.length > 1) {
-                    errors.push({ row: r, ...caseErrCtx, errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
-                    continue;
-                }
-                const phoneId = byPhone[0]?._id?.toString();
-                const emailId = byEmail[0]?._id?.toString();
-                if (phoneId && emailId && phoneId !== emailId) {
-                    errors.push({ row: r, ...caseErrCtx, errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
-                    continue;
-                }
-                if (phoneId || emailId) {
-                    resolvedClientId = phoneId || emailId;
+                if (recheck.linkedClientId) {
+                    resolvedClientId = recheck.linkedClientId;
                     linkedExistingClients++;
                 }
 
                 if (!resolvedClientId) {
-                try {
-                    const created = await Client.create({
+                    const newClientId = generateClientId();
+                    const clientDoc = {
+                        _id: newClientId,
                         firstName: cf,
                         lastName: cln,
                         email: clientEmail || undefined,
@@ -916,16 +1095,16 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                         country,
                         fees,
                         organization: organizationId,
-                        createdBy: userId,
-                        // Case import template does not include assignedTo; default is unassigned.
+                        createdBy: createdByStr,
                         assignedTo: null
+                    };
+                    groupPendingClients.push(clientDoc);
+                    addCreatedClientToCaseExcelLookups(lookups, {
+                        _id: newClientId,
+                        phone: clientPhone,
+                        email: clientEmail || undefined
                     });
-                    resolvedClientId = created._id.toString();
-                    createdClients++;
-                } catch (e) {
-                    errors.push({ row: r, ...caseErrCtx, errors: formatMongooseErrorForUser(e) });
-                    continue;
-                }
+                    resolvedClientId = newClientId;
                 }
             }
 
@@ -937,11 +1116,13 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
 
         const effectiveClientCount = clientCount === undefined ? clientIds.length : (Number.isNaN(clientCount) ? NaN : clientCount);
         if (Number.isNaN(effectiveClientCount)) {
+            for (const doc of groupPendingClients) removePendingClientFromCaseExcelLookups(lookups, doc);
             errors.push({ row: first.rowNumber, ...caseErrCtx, errors: ['clientCount must be a number'] });
             skippedCases++;
             continue;
         }
         if (clientIds.length > effectiveClientCount) {
+            for (const doc of groupPendingClients) removePendingClientFromCaseExcelLookups(lookups, doc);
             errors.push({
                 row: first.rowNumber,
                 ...caseErrCtx,
@@ -951,26 +1132,36 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             continue;
         }
 
-        try {
-            await Case.create({
-                ...(caseNumber ? { caseNumber } : {}),
-                caseType,
-                partyName,
-                stage,
-                courtName,
-                courtPremises,
-                assignedTo: null,
-                clientCount: effectiveClientCount,
-                clients: clientIds,
-                notes,
-                organization: organizationId,
-                createdBy: userId
-            });
-            createdCases++;
-        } catch (e) {
-            errors.push({ row: first.rowNumber, ...caseErrCtx, errors: formatMongooseErrorForUser(e) });
-            skippedCases++;
+        pendingNewClients.push(...groupPendingClients);
+        pendingNewCases.push({
+            ...(caseNumber ? { caseNumber } : {}),
+            caseType,
+            partyName,
+            stage,
+            courtName,
+            courtPremises,
+            assignedTo: null,
+            clientCount: effectiveClientCount,
+            clients: clientIds,
+            notes,
+            organization: organizationId,
+            createdBy: createdByStr
+        });
+    }
+
+    let createdCases = 0;
+    let createdClients = 0;
+    try {
+        if (pendingNewClients.length) {
+            await Client.insertMany(pendingNewClients, { ordered: true });
+            createdClients = pendingNewClients.length;
         }
+        if (pendingNewCases.length) {
+            await Case.insertMany(pendingNewCases, { ordered: true });
+            createdCases = pendingNewCases.length;
+        }
+    } catch (e) {
+        return next(new ErrorResponse(formatMongooseErrorForUser(e).join('; ') || 'Bulk case/client import failed', 500));
     }
 
     // Notify assignees when a non-assignee bulk-imports unassigned cases
@@ -1183,19 +1374,24 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
         groups.get(key).push({ rowNumber: r, data: d });
     }
 
+    const lookups = await loadCaseExcelImportLookups(organizationId, parsed.rows);
+
     const preview = [];
 
     for (const [caseKey, rows] of groups.entries()) {
         const first = rows[0];
-        const d0 = first.data;
-        const caseNumber = toSafeString(d0.caseNumber).trim();
-        const caseType = toSafeString(d0.caseType).trim();
-        const partyName = toSafeString(d0.partyName).trim();
-        const stage = toSafeString(d0.stage) || undefined;
-        const courtName = toSafeString(d0.courtName) || undefined;
-        const courtPremises = toSafeString(d0.courtPremises) || undefined;
-        const notes = toSafeString(d0.notes) || undefined;
-        const clientCount = toOptionalNumber(d0.clientCount);
+        const caseNumber = firstNonEmptyCaseExcelField(rows, 'caseNumber');
+        const caseType = firstNonEmptyCaseExcelField(rows, 'caseType');
+        const partyName = firstNonEmptyCaseExcelField(rows, 'partyName');
+        const stageRaw = firstNonEmptyCaseExcelField(rows, 'stage');
+        const stage = stageRaw || undefined;
+        const courtNameRaw = firstNonEmptyCaseExcelField(rows, 'courtName');
+        const courtName = courtNameRaw || undefined;
+        const courtPremisesRaw = firstNonEmptyCaseExcelField(rows, 'courtPremises');
+        const courtPremises = courtPremisesRaw || undefined;
+        const notesRaw = firstNonEmptyCaseExcelField(rows, 'notes');
+        const notes = notesRaw || undefined;
+        const clientCount = firstDefinedClientCountInCaseGroup(rows);
 
         const caseIssues = [];
         if (!caseType) caseIssues.push('caseType is required');
@@ -1215,11 +1411,8 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
             caseIssues.push('Only users with case assignee permission can link/create clients during import');
         }
 
-        if (caseNumber) {
-            const existingCase = await Case.findOne({ organization: organizationId, caseNumber, deletedAt: null }).select('_id').lean();
-            if (existingCase) {
-                caseIssues.push('A case with this caseNumber already exists');
-            }
+        if (caseNumber && lookups.existingCaseNumbers.has(caseNumber)) {
+            caseIssues.push('A case with this caseNumber already exists');
         }
 
         const casePreviewErrCtx = { ...(caseNumber ? { caseNumber } : {}) };
@@ -1231,46 +1424,18 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
             const r = rr.rowNumber;
             const d = rr.data;
 
-            const clientId = toSafeString(d.clientId);
-            const clientPhoneRaw = toSafeString(d.clientPhone);
-            const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
-            const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+            const {
+                clientPhone,
+                clientPhoneRaw,
+                clientEmail,
+                linkedClientId: resolvedFromLookup,
+                clientIssues: matchIssues
+            } = resolveCaseExcelClientFromLookups(d, lookups);
 
-            const clientIssues = [];
-            let action = 'none'; // none | link_existing | create_new | invalid
-            let linkedClientId = null;
-
-            if (clientId) {
-                const cl = await Client.findOne({ _id: clientId, organization: organizationId, deletedAt: null }).select('_id').lean();
-                if (!cl) {
-                    clientIssues.push(`clientId "${clientId}" not found in your organization`);
-                } else {
-                    action = 'link_existing';
-                    linkedClientId = cl._id.toString();
-                }
-            } else if (clientPhone || clientEmail) {
-                const byPhone = clientPhone
-                    ? await Client.find({ organization: organizationId, deletedAt: null, phone: clientPhone }).select('_id').lean()
-                    : [];
-                const byEmail = clientEmail
-                    ? await Client.find({ organization: organizationId, deletedAt: null, email: clientEmail }).select('_id').lean()
-                    : [];
-
-                if (byPhone.length > 1) clientIssues.push(`clientPhone "${clientPhoneRaw}" matches multiple clients`);
-                if (byEmail.length > 1) clientIssues.push(`clientEmail "${clientEmail}" matches multiple clients`);
-
-                const phoneId = byPhone[0]?._id?.toString();
-                const emailId = byEmail[0]?._id?.toString();
-                if (phoneId && emailId && phoneId !== emailId) {
-                    clientIssues.push('clientPhone and clientEmail belong to different clients');
-                }
-
-                const resolved = phoneId || emailId || null;
-                if (!clientIssues.length && resolved) {
-                    action = 'link_existing';
-                    linkedClientId = resolved;
-                }
-            }
+            const clientIssues = [...matchIssues];
+            let action = 'none'; // none | link_existing | create_new
+            let linkedClientId = resolvedFromLookup;
+            if (linkedClientId) action = 'link_existing';
 
             if (!linkedClientId && (clientPhone || clientEmail || toSafeString(d.clientFirstName) || toSafeString(d.clientLastName))) {
                 const cf = toSafeString(d.clientFirstName);
