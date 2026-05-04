@@ -39,7 +39,12 @@ const CASE_EXCEL_SHEET = 'Cases';
 const CASE_COURT_PREMISES_ENUM = Case.schema?.path('courtPremises')?.enumValues || [];
 // One row can represent one case-client link.
 // Merge rows by caseNumber (trimmed) when provided; duplicate caseNumbers become one case with multiple clients.
-// Leave caseNumber empty to create one case per row; caseNumber and internal case _id are auto-generated when omitted.
+// If caseNumber is merged vertically in Excel, only the first row may contain the value — following rows with
+// empty caseNumber but client (or case-side) data still merge into that caseNumber when it appeared above.
+// When caseNumber is empty: rows belong to one case if they share the same caseType+partyName anchor, or if they
+// are continuation rows (client columns and/or notes, court, clientCount, etc.) before the next anchor — blank
+// Excel rows are skipped, so a client on a later row still links to the same case.
+// caseNumber and internal case _id are auto-generated when omitted.
 // For client resolution, provide clientId OR clientPhone OR clientEmail. If none match and you want auto-create,
 // provide required client creation fields.
 const CASE_EXCEL_HEADERS_V2 = [
@@ -101,6 +106,98 @@ function firstDefinedClientCountInCaseGroup(rows) {
         if (n !== undefined && !Number.isNaN(n)) return n;
     }
     return undefined;
+}
+
+/** Stable key when both case type and party name are present (used to merge repeated header rows). */
+function caseExcelImplicitAnchorKey(d) {
+    const t = toSafeString(d.caseType).trim().toLowerCase();
+    const p = toSafeString(d.partyName).trim().toLowerCase();
+    if (!t || !p) return null;
+    return `${t}\0${p}`;
+}
+
+function caseExcelRowHasClientPayload(d) {
+    return !!(
+        toSafeString(d.clientId) ||
+        toSafeString(d.clientPhone) ||
+        toSafeString(d.clientEmail) ||
+        toSafeString(d.clientFirstName) ||
+        toSafeString(d.clientLastName)
+    );
+}
+
+function caseExcelRowHasContinuationFields(d) {
+    return !!(
+        toSafeString(d.stage) ||
+        toSafeString(d.courtName) ||
+        toSafeString(d.courtPremises) ||
+        toSafeString(d.notes) ||
+        toOptionalNumber(d.clientCount) !== undefined
+    );
+}
+
+/**
+ * Build import groups in sheet order.
+ * - Rows with the same caseNumber (trimmed) merge. Continuation rows often leave caseNumber blank after a merged
+ *   cell in Excel — those attach to the most recent row that had a caseNumber if they carry client/continuation data.
+ * - Without caseNumber: implicit groups use caseType+partyName anchor plus continuation rows as before.
+ */
+function buildCaseExcelImportGroups(parsedRows) {
+    const groups = new Map();
+    let implicitGroupKey = null;
+    let implicitAnchorKey = null;
+    /** Most recent physical row's caseNumber; continuation rows with empty caseNumber merge here. */
+    let lastExplicitCaseNumber = null;
+
+    for (const row of parsedRows) {
+        const d = row.data;
+        const r = row.rowNumber;
+        const cn = toSafeString(d.caseNumber).trim();
+
+        if (cn) {
+            implicitGroupKey = null;
+            implicitAnchorKey = null;
+            lastExplicitCaseNumber = cn;
+            if (!groups.has(cn)) groups.set(cn, []);
+            groups.get(cn).push(row);
+            continue;
+        }
+
+        const anchorKey = caseExcelImplicitAnchorKey(d);
+
+        if (anchorKey) {
+            lastExplicitCaseNumber = null;
+            if (implicitGroupKey && implicitAnchorKey === anchorKey) {
+                groups.get(implicitGroupKey).push(row);
+            } else {
+                implicitAnchorKey = anchorKey;
+                implicitGroupKey = `__implicit_${r}`;
+                groups.set(implicitGroupKey, [row]);
+            }
+            continue;
+        }
+
+        if (
+            lastExplicitCaseNumber &&
+            (caseExcelRowHasClientPayload(d) || caseExcelRowHasContinuationFields(d))
+        ) {
+            groups.get(lastExplicitCaseNumber).push(row);
+            continue;
+        }
+
+        if (implicitGroupKey && (caseExcelRowHasClientPayload(d) || caseExcelRowHasContinuationFields(d))) {
+            groups.get(implicitGroupKey).push(row);
+            continue;
+        }
+
+        implicitGroupKey = null;
+        implicitAnchorKey = null;
+        lastExplicitCaseNumber = null;
+        const orphanKey = `__row_${r}`;
+        groups.set(orphanKey, [row]);
+    }
+
+    return groups;
 }
 
 function isStrictObjectIdString(id) {
@@ -941,19 +1038,8 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
     const canAssign = req.userRole && canAssignModule(req.userRole, 'cases');
     const importerIsAssignee = !!canAssign;
 
-    // Group rows by caseNumber (trimmed) if present. If missing, each row becomes its own case.
-    const groups = new Map();
+    const groups = buildCaseExcelImportGroups(parsed.rows);
     const errors = [];
-
-    for (const row of parsed.rows) {
-        const r = row.rowNumber;
-        const d = row.data;
-
-        const caseNumber = toSafeString(d.caseNumber);
-        const key = caseNumber ? caseNumber.trim() : `__row_${r}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push({ rowNumber: r, data: d });
-    }
 
     const lookups = await loadCaseExcelImportLookups(organizationId, parsed.rows);
 
@@ -1360,19 +1446,8 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
 
     const canAssign = req.userRole && canAssignModule(req.userRole, 'cases');
 
-    // Group rows by caseNumber (trimmed) if present. If missing, each row becomes its own case.
-    const groups = new Map();
+    const groups = buildCaseExcelImportGroups(parsed.rows);
     const errors = [];
-
-    for (const row of parsed.rows) {
-        const r = row.rowNumber;
-        const d = row.data;
-
-        const caseNumber = toSafeString(d.caseNumber);
-        const key = caseNumber ? caseNumber.trim() : `__row_${r}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push({ rowNumber: r, data: d });
-    }
 
     const lookups = await loadCaseExcelImportLookups(organizationId, parsed.rows);
 

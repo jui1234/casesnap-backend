@@ -12,6 +12,34 @@ const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber
 
 const canViewAllClients = (userRole) => canAssignModule(userRole, 'client');
 
+const CLIENT_LIST_SEARCH_FIELDS = ['firstName', 'lastName', 'email', 'phone', 'companyName'];
+
+function escapeRegexLiteral(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Multi-word search (e.g. URL `search=rohan+gupta` → "rohan gupta") matches across name fields. */
+function applyClientListSearchToQuery(query, search) {
+    const trimmed = String(search ?? '').trim();
+    if (!trimmed) return;
+
+    const tokens = trimmed.split(/\s+/).map((t) => escapeRegexLiteral(t)).filter(Boolean);
+    if (tokens.length === 0) return;
+
+    const orClauseForToken = (token) => ({
+        $or: CLIENT_LIST_SEARCH_FIELDS.map((field) => ({
+            [field]: { $regex: token, $options: 'i' }
+        }))
+    });
+
+    if (tokens.length === 1) {
+        query.$or = orClauseForToken(tokens[0]).$or;
+        return;
+    }
+
+    query.$and = [...(query.$and || []), ...tokens.map(orClauseForToken)];
+}
+
 const CLIENT_EXCEL_SHEET = 'Clients';
 const CLIENT_GENDER_ENUM = Client.schema?.path('gender')?.enumValues || ['Male', 'Female', 'Other', 'Prefer not to say'];
 const CLIENT_STATUS_ENUM = Client.schema?.path('status')?.enumValues || ['active', 'inactive', 'prospect', 'archived'];
@@ -450,13 +478,7 @@ exports.getClients = asyncHandler(async (req, res, next) => {
     }
 
     if (search) {
-        query.$or = [
-            { firstName: { $regex: search, $options: 'i' } },
-            { lastName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { phone: { $regex: search, $options: 'i' } },
-            { companyName: { $regex: search, $options: 'i' } }
-        ];
+        applyClientListSearchToQuery(query, search);
     }
 
     // Pagination
@@ -780,13 +802,7 @@ exports.exportClientsToExcel = asyncHandler(async (req, res) => {
     }
 
     if (search) {
-        query.$or = [
-            { firstName: { $regex: search, $options: 'i' } },
-            { lastName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { phone: { $regex: search, $options: 'i' } },
-            { companyName: { $regex: search, $options: 'i' } }
-        ];
+        applyClientListSearchToQuery(query, search);
     }
 
     const findOptions = showDeleted ? { includeDeleted: true } : {};
