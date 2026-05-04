@@ -4,7 +4,7 @@
 const ErrorResponse = require('../utils/errorResponse');
 const Role = require('../models/Role');
 const User = require('../models/User');
-const { getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
+const { getAssigneePermissionsForRole, canAssignModule } = require('../utils/assigneeUtils');
 
 /**
  * Middleware to ensure user has a role and load it
@@ -170,6 +170,28 @@ exports.isSuperAdmin = async (req, res, next) => {
  * Middleware: allow only users who have assignee permission (canAssignClient or canAssignCase).
  * Used for GET /api/users/assignable so only assignees can see the full list for client/case assignment.
  */
+/**
+ * Bulk assign clients: allowed for SUPER_ADMIN and roles with `assignee` on the `client` module.
+ * Use after `checkPermission('client', 'read')` (or equivalent) so SUPER_ADMIN still bypasses read.
+ */
+exports.requireClientBulkAssignAccess = async (req, res, next) => {
+    try {
+        if (!req.userRole) {
+            return next(new ErrorResponse('User role not loaded', 500));
+        }
+        if (!canAssignModule(req.userRole, 'client')) {
+            return next(new ErrorResponse(
+                'You do not have permission to bulk assign clients. Only SUPER_ADMIN or users with client assignee permission can use this.',
+                403
+            ));
+        }
+        next();
+    } catch (error) {
+        console.error('❌ Error checking bulk client assign access:', error.message);
+        return next(new ErrorResponse('Error checking permissions', 500));
+    }
+};
+
 exports.requireAssignableListAccess = async (req, res, next) => {
     try {
         if (!req.userRole) {
