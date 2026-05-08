@@ -19,11 +19,12 @@ const {
     downloadCaseExcelTemplate,
     exportCasesToExcel,
     importCasesFromExcel,
-    previewCasesExcelImport
+    previewCasesExcelImport,
+    bulkAssignCases
 } = require('../controllers/caseController');
 
 const { protect } = require('../middleware/auth');
-const { loadUserRole, checkPermission } = require('../middleware/rbac');
+const { loadUserRole, checkPermission, requireCaseBulkAssignAccess } = require('../middleware/rbac');
 
 router.use(protect);
 router.use(loadUserRole);
@@ -67,6 +68,8 @@ router.post('/excel/import', checkPermission('cases', 'create'), excelUpload.fie
     { name: 'excel', maxCount: 1 },
     { name: 'upload', maxCount: 1 }
 ]), normalizeExcelFile, importCasesFromExcel);
+
+router.post('/bulk-assign', checkPermission('cases', 'read'), requireCaseBulkAssignAccess, bulkAssignCases);
 
 router.get('/:id', checkPermission('cases', 'read'), getCase);
 router.post('/:id/stages', checkPermission('cases', 'update'), addCaseStage);
