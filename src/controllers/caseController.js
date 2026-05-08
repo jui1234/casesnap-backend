@@ -16,6 +16,30 @@ const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber
 const canViewAllCases = (userRole) => canAssignModule(userRole, 'cases');
 const STAGE_CONFIRM_USER_SELECT = '_id firstName lastName email';
 
+const MAX_BULK_ASSIGN_CASES = 2000;
+
+function normalizeCaseIdList(rawIds) {
+    return [...new Set((rawIds || []).map((id) => String(id ?? '').trim()).filter(Boolean))];
+}
+
+async function assertAssigneeInOrg(organizationId, assignedTo) {
+    if (assignedTo === undefined || assignedTo === null || String(assignedTo).trim() === '') {
+        return null;
+    }
+    const targetAssignedTo = String(assignedTo).trim();
+    const assigneeUser = await User.findOne({
+        _id: targetAssignedTo,
+        organization: organizationId,
+        status: { $nin: ['terminated'] }
+    })
+        .select('_id')
+        .lean();
+    if (!assigneeUser) {
+        return { error: 'Assignee not found in your organization or account is terminated' };
+    }
+    return { assignedTo: targetAssignedTo };
+}
+
 const normalizeOrganizationId = (org) => {
     if (!org) return null;
     if (typeof org === 'string') return org;
@@ -520,6 +544,223 @@ exports.createCase = asyncHandler(async (req, res, next) => {
         success: true,
         message: 'Case created successfully',
         data: newCase
+    });
+});
+
+/**
+ * @desc    Bulk assign cases to user(s) (or unassign). SUPER_ADMIN or cases-module assignees only.
+ * @route   POST /api/cases/bulk-assign
+ * @access  Private — `cases` read + cases assignee (see rbac.requireCaseBulkAssignAccess)
+ * @body    Mode A — one assignee for many cases:
+ *          { caseIds: string[], assignedTo?: string | null }
+ *          Mode B — many assignees in one request (each group: many cases → one user):
+ *          { groups: Array<{ caseIds: string[], assignedTo?: string | null }> }
+ *          Use `assignedTo: null` or omit to clear assignment for that group. Each case may appear in only one group.
+ */
+exports.bulkAssignCases = asyncHandler(async (req, res, next) => {
+    const organizationId = req.user.organization;
+    const userId = req.user._id;
+    const updatedByStr = userId && userId.toString ? userId.toString() : String(userId);
+
+    const { caseIds, assignedTo, groups } = req.body;
+    const useGroups = Array.isArray(groups) && groups.length > 0;
+
+    if (useGroups) {
+        const seenCases = new Set();
+        const normalizedGroups = [];
+
+        for (let i = 0; i < groups.length; i++) {
+            const g = groups[i] || {};
+            const ids = normalizeCaseIdList(g.caseIds);
+            if (ids.length === 0) {
+                return next(new ErrorResponse(`groups[${i}].caseIds must contain at least one case ID`, 400));
+            }
+            for (const id of ids) {
+                if (seenCases.has(id)) {
+                    return next(
+                        new ErrorResponse(
+                            `Each case can only appear once across groups (duplicate: ${id})`,
+                            400
+                        )
+                    );
+                }
+                seenCases.add(id);
+            }
+            normalizedGroups.push({ caseIds: ids, assignedTo: g.assignedTo });
+        }
+
+        if (seenCases.size > MAX_BULK_ASSIGN_CASES) {
+            return next(new ErrorResponse(`At most ${MAX_BULK_ASSIGN_CASES} distinct cases per request`, 400));
+        }
+
+        const assigneeIdsToCheck = new Set();
+        for (const g of normalizedGroups) {
+            if (g.assignedTo !== undefined && g.assignedTo !== null && String(g.assignedTo).trim() !== '') {
+                assigneeIdsToCheck.add(String(g.assignedTo).trim());
+            }
+        }
+
+        for (const aid of assigneeIdsToCheck) {
+            const check = await assertAssigneeInOrg(organizationId, aid);
+            if (check && check.error) return next(new ErrorResponse(`${check.error} (userId: ${aid})`, 400));
+        }
+
+        const groupResults = [];
+        let totalRequested = 0;
+        let totalMatched = 0;
+        let totalModified = 0;
+
+        for (let i = 0; i < normalizedGroups.length; i++) {
+            const { caseIds: gIds, assignedTo: gAssign } = normalizedGroups[i];
+            totalRequested += gIds.length;
+
+            let targetAssignedTo = null;
+            if (gAssign !== undefined && gAssign !== null && String(gAssign).trim() !== '') {
+                targetAssignedTo = String(gAssign).trim();
+            }
+
+            const existing = await Case.find({
+                _id: { $in: gIds },
+                organization: organizationId,
+                deletedAt: null
+            })
+                .select('_id')
+                .lean();
+
+            const matchedIds = existing.map((c) => c._id.toString());
+            const matchedSet = new Set(matchedIds);
+            const missingIds = gIds.filter((id) => !matchedSet.has(id));
+
+            let matchedCount = 0;
+            let modifiedCount = 0;
+            if (matchedIds.length > 0) {
+                const updateResult = await Case.updateMany(
+                    {
+                        _id: { $in: matchedIds },
+                        organization: organizationId,
+                        deletedAt: null
+                    },
+                    {
+                        $set: {
+                            assignedTo: targetAssignedTo,
+                            updatedBy: updatedByStr
+                        }
+                    }
+                );
+                matchedCount = updateResult.matchedCount ?? updateResult.nMatched ?? matchedIds.length;
+                modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
+            }
+
+            totalMatched += matchedCount;
+            totalModified += modifiedCount;
+
+            groupResults.push({
+                groupIndex: i,
+                assignedTo: targetAssignedTo,
+                requested: gIds.length,
+                matched: matchedCount,
+                modified: modifiedCount,
+                missingIds:
+                    missingIds.length <= 50
+                        ? missingIds
+                        : missingIds.slice(0, 50).concat([`(+${missingIds.length - 50} more not listed)`])
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: 'Bulk assign completed (grouped)',
+            data: {
+                mode: 'groups',
+                groupCount: normalizedGroups.length,
+                requested: totalRequested,
+                matched: totalMatched,
+                modified: totalModified,
+                groups: groupResults
+            }
+        });
+    }
+
+    if (!Array.isArray(caseIds) || caseIds.length === 0) {
+        return next(
+            new ErrorResponse(
+                'Send either { caseIds, assignedTo } for one assignee, or { groups: [{ caseIds, assignedTo }, ...] } for multiple assignees',
+                400
+            )
+        );
+    }
+    if (caseIds.length > MAX_BULK_ASSIGN_CASES) {
+        return next(new ErrorResponse(`At most ${MAX_BULK_ASSIGN_CASES} cases per request`, 400));
+    }
+
+    const uniqueIds = normalizeCaseIdList(caseIds);
+    if (uniqueIds.length === 0) {
+        return next(new ErrorResponse('caseIds must contain at least one valid case ID', 400));
+    }
+
+    const assigneeCheck = await assertAssigneeInOrg(organizationId, assignedTo);
+    if (assigneeCheck && assigneeCheck.error) {
+        return next(new ErrorResponse(assigneeCheck.error, 400));
+    }
+    const targetAssignedTo = assigneeCheck ? assigneeCheck.assignedTo : null;
+
+    const existing = await Case.find({
+        _id: { $in: uniqueIds },
+        organization: organizationId,
+        deletedAt: null
+    })
+        .select('_id')
+        .lean();
+
+    const matchedIds = existing.map((c) => c._id.toString());
+    const matchedSet = new Set(matchedIds);
+
+    if (matchedIds.length === 0) {
+        return res.status(200).json({
+            success: true,
+            message: 'No matching cases updated',
+            data: {
+                mode: 'single',
+                requested: uniqueIds.length,
+                matched: 0,
+                modified: 0,
+                missingIds: uniqueIds.slice(0, 100)
+            }
+        });
+    }
+
+    const updateResult = await Case.updateMany(
+        {
+            _id: { $in: matchedIds },
+            organization: organizationId,
+            deletedAt: null
+        },
+        {
+            $set: {
+                assignedTo: targetAssignedTo,
+                updatedBy: updatedByStr
+            }
+        }
+    );
+
+    const matchedCount = updateResult.matchedCount ?? updateResult.nMatched ?? matchedIds.length;
+    const modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
+    const missingIds = uniqueIds.filter((id) => !matchedSet.has(id));
+
+    return res.status(200).json({
+        success: true,
+        message: 'Bulk assign completed',
+        data: {
+            mode: 'single',
+            requested: uniqueIds.length,
+            matched: matchedCount,
+            modified: modifiedCount,
+            assignedTo: targetAssignedTo,
+            missingIds:
+                missingIds.length <= 100
+                    ? missingIds
+                    : missingIds.slice(0, 100).concat([`(+${missingIds.length - 100} more not listed)`])
+        }
     });
 });
 

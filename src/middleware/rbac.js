@@ -192,6 +192,28 @@ exports.requireClientBulkAssignAccess = async (req, res, next) => {
     }
 };
 
+/**
+ * Bulk assign cases: allowed for SUPER_ADMIN and roles with `assignee` on the `cases` module.
+ * Use after `checkPermission('cases', 'read')` (or equivalent) so SUPER_ADMIN still bypasses read.
+ */
+exports.requireCaseBulkAssignAccess = async (req, res, next) => {
+    try {
+        if (!req.userRole) {
+            return next(new ErrorResponse('User role not loaded', 500));
+        }
+        if (!canAssignModule(req.userRole, 'cases')) {
+            return next(new ErrorResponse(
+                'You do not have permission to bulk assign cases. Only SUPER_ADMIN or users with case assignee permission can use this.',
+                403
+            ));
+        }
+        next();
+    } catch (error) {
+        console.error('❌ Error checking bulk case assign access:', error.message);
+        return next(new ErrorResponse('Error checking permissions', 500));
+    }
+};
+
 exports.requireAssignableListAccess = async (req, res, next) => {
     try {
         if (!req.userRole) {
