@@ -529,7 +529,7 @@ exports.getAssignableUsers = asyncHandler(async (req, res, next) => {
 
     const query = {
         organization: organizationId,
-        status: { $nin: ['terminated'] }
+        status: 'approved'
     };
 
     if (search && search.trim()) {
