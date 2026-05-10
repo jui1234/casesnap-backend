@@ -2,11 +2,14 @@
 // Client CRUD operations with RBAC
 
 const Client = require('../models/Client');
-const User = require('../models/User');
 const Notification = require('../models/Notification');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
-const { canAssignModule, getAssigneeUserIdsForModule } = require('../utils/assigneeUtils');
+const {
+    canAssignModule,
+    getAssigneeUserIdsForModule,
+    assertAssignableUserInOrg
+} = require('../utils/assigneeUtils');
 const { sendEncryptedJson } = require('../utils/responseEncryption');
 const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber, toOptionalDate, formatMongooseErrorForUser } = require('../utils/excelUtils');
 
@@ -123,6 +126,10 @@ exports.createClient = asyncHandler(async (req, res, next) => {
         if (String(effectiveAssignedTo) !== String(userId) && req.userRole && !canAssignModule(req.userRole, 'client')) {
             return next(new ErrorResponse('You do not have permission to assign clients to other users', 403));
         }
+        const assigneeCheck = await assertAssignableUserInOrg(organizationId, effectiveAssignedTo);
+        if (assigneeCheck && assigneeCheck.error) {
+            return next(new ErrorResponse(assigneeCheck.error, 400));
+        }
     }
 
     // Create client
@@ -199,24 +206,6 @@ function normalizeClientIdList(rawIds) {
     return [...new Set((rawIds || []).map((id) => String(id ?? '').trim()).filter(Boolean))];
 }
 
-async function assertAssigneeInOrg(organizationId, assignedTo) {
-    if (assignedTo === undefined || assignedTo === null || String(assignedTo).trim() === '') {
-        return null;
-    }
-    const targetAssignedTo = String(assignedTo).trim();
-    const assigneeUser = await User.findOne({
-        _id: targetAssignedTo,
-        organization: organizationId,
-        status: { $nin: ['terminated'] }
-    })
-        .select('_id')
-        .lean();
-    if (!assigneeUser) {
-        return { error: 'Assignee not found in your organization or account is terminated' };
-    }
-    return { assignedTo: targetAssignedTo };
-}
-
 /**
  * @desc    Bulk assign clients to user(s) (or unassign). SUPER_ADMIN or client-module assignees only.
  * @route   POST /api/clients/bulk-assign
@@ -272,7 +261,7 @@ exports.bulkAssignClients = asyncHandler(async (req, res, next) => {
         }
 
         for (const aid of assigneeIdsToCheck) {
-            const check = await assertAssigneeInOrg(organizationId, aid);
+            const check = await assertAssignableUserInOrg(organizationId, aid);
             if (check.error) return next(new ErrorResponse(`${check.error} (userId: ${aid})`, 400));
         }
 
@@ -369,11 +358,11 @@ exports.bulkAssignClients = asyncHandler(async (req, res, next) => {
         return next(new ErrorResponse('clientIds must contain at least one valid client ID', 400));
     }
 
-    const assigneeCheck = await assertAssigneeInOrg(organizationId, assignedTo);
-    if (assigneeCheck.error) {
+    const assigneeCheck = await assertAssignableUserInOrg(organizationId, assignedTo);
+    if (assigneeCheck && assigneeCheck.error) {
         return next(new ErrorResponse(assigneeCheck.error, 400));
     }
-    const targetAssignedTo = assigneeCheck.assignedTo;
+    const targetAssignedTo = assigneeCheck ? assigneeCheck.assignedTo : null;
 
     const existing = await Client.find({
         _id: { $in: uniqueIds },
@@ -584,6 +573,16 @@ exports.updateClient = asyncHandler(async (req, res, next) => {
     if (req.body.assignedTo !== undefined && String(req.body.assignedTo) !== String(client.assignedTo)) {
         if (!req.userRole || !canAssignModule(req.userRole, 'client')) {
             return next(new ErrorResponse('You do not have permission to assign clients to other users', 403));
+        }
+    }
+
+    if (req.body.assignedTo !== undefined) {
+        const rawAssigned = req.body.assignedTo;
+        if (rawAssigned !== null && String(rawAssigned).trim() !== '') {
+            const assigneeCheck = await assertAssignableUserInOrg(organizationId, rawAssigned);
+            if (assigneeCheck && assigneeCheck.error) {
+                return next(new ErrorResponse(assigneeCheck.error, 400));
+            }
         }
     }
 

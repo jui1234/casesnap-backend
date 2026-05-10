@@ -9,7 +9,11 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
-const { canAssignModule, getAssigneeUserIdsForModule } = require('../utils/assigneeUtils');
+const {
+    canAssignModule,
+    getAssigneeUserIdsForModule,
+    assertAssignableUserInOrg
+} = require('../utils/assigneeUtils');
 const { sendEncryptedJson } = require('../utils/responseEncryption');
 const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber, formatMongooseErrorForUser } = require('../utils/excelUtils');
 
@@ -20,24 +24,6 @@ const MAX_BULK_ASSIGN_CASES = 2000;
 
 function normalizeCaseIdList(rawIds) {
     return [...new Set((rawIds || []).map((id) => String(id ?? '').trim()).filter(Boolean))];
-}
-
-async function assertAssigneeInOrg(organizationId, assignedTo) {
-    if (assignedTo === undefined || assignedTo === null || String(assignedTo).trim() === '') {
-        return null;
-    }
-    const targetAssignedTo = String(assignedTo).trim();
-    const assigneeUser = await User.findOne({
-        _id: targetAssignedTo,
-        organization: organizationId,
-        status: { $nin: ['terminated'] }
-    })
-        .select('_id')
-        .lean();
-    if (!assigneeUser) {
-        return { error: 'Assignee not found in your organization or account is terminated' };
-    }
-    return { assignedTo: targetAssignedTo };
 }
 
 const normalizeOrganizationId = (org) => {
@@ -484,6 +470,10 @@ exports.createCase = asyncHandler(async (req, res, next) => {
         if (String(effectiveAssignedTo) !== String(userId) && req.userRole && !canAssignModule(req.userRole, 'cases')) {
             return next(new ErrorResponse('You do not have permission to assign cases to other users', 403));
         }
+        const assigneeCheck = await assertAssignableUserInOrg(organizationId, effectiveAssignedTo);
+        if (assigneeCheck && assigneeCheck.error) {
+            return next(new ErrorResponse(assigneeCheck.error, 400));
+        }
     }
 
     const newCase = await Case.create({
@@ -601,7 +591,7 @@ exports.bulkAssignCases = asyncHandler(async (req, res, next) => {
         }
 
         for (const aid of assigneeIdsToCheck) {
-            const check = await assertAssigneeInOrg(organizationId, aid);
+            const check = await assertAssignableUserInOrg(organizationId, aid);
             if (check && check.error) return next(new ErrorResponse(`${check.error} (userId: ${aid})`, 400));
         }
 
@@ -698,7 +688,7 @@ exports.bulkAssignCases = asyncHandler(async (req, res, next) => {
         return next(new ErrorResponse('caseIds must contain at least one valid case ID', 400));
     }
 
-    const assigneeCheck = await assertAssigneeInOrg(organizationId, assignedTo);
+    const assigneeCheck = await assertAssignableUserInOrg(organizationId, assignedTo);
     if (assigneeCheck && assigneeCheck.error) {
         return next(new ErrorResponse(assigneeCheck.error, 400));
     }
@@ -927,6 +917,16 @@ exports.updateCase = asyncHandler(async (req, res, next) => {
     if (req.body.assignedTo !== undefined && String(req.body.assignedTo) !== String(caseDoc.assignedTo)) {
         if (!req.userRole || !canAssignModule(req.userRole, 'cases')) {
             return next(new ErrorResponse('You do not have permission to assign cases to other users', 403));
+        }
+    }
+
+    if (req.body.assignedTo !== undefined) {
+        const rawAssigned = req.body.assignedTo;
+        if (rawAssigned !== null && String(rawAssigned).trim() !== '') {
+            const assigneeCheck = await assertAssignableUserInOrg(organizationId, rawAssigned);
+            if (assigneeCheck && assigneeCheck.error) {
+                return next(new ErrorResponse(assigneeCheck.error, 400));
+            }
         }
     }
 
@@ -1539,7 +1539,7 @@ exports.getCaseAssignees = asyncHandler(async (req, res, next) => {
     const users = await User.find({
         _id: { $in: assigneeUserIds },
         organization: organizationId,
-        status: { $nin: ['terminated'] }
+        status: 'approved'
     })
         .select('_id firstName lastName email')
         .sort({ firstName: 1, lastName: 1 })
@@ -1627,7 +1627,7 @@ exports.addCaseStage = asyncHandler(async (req, res, next) => {
     const confirmUsersCount = await User.countDocuments({
         _id: { $in: confirmIds },
         organization: organizationId,
-        status: { $nin: ['terminated'] }
+        status: 'approved'
     });
     if (confirmUsersCount !== confirmIds.length) {
         return next(new ErrorResponse('One or more confirmedBy users are invalid for this organization', 400));
