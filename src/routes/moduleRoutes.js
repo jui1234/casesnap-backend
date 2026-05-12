@@ -12,7 +12,7 @@ const {
 const { protect, protectOptional } = require('../middleware/auth');
 const { loadUserRole } = require('../middleware/rbac');
 
-// Optional auth: if Bearer token sent and user is SUPER_ADMIN, modules include "assignee" for client/cases
+// Optional auth: if Bearer token sent, client/cases modules include "assignee" when that user’s role has assignee permission
 router.get('/', protectOptional, getModules);
 
 // Protected routes - require authentication

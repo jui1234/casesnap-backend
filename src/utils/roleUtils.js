@@ -61,15 +61,31 @@ const ASSIGNEE_ACTION = 'assignee';
 
 /**
  * Get allowed actions for a module (for API response).
- * Assignee is only included for client/cases when includeAssignee is true (SUPER_ADMIN only).
+ * Assignee is included for `client` / `cases` when any of:
+ * - `includeAssignee: true` (SUPER_ADMIN in role UI), or
+ * - `assigneeClient: true` / `assigneeCases: true` per module (e.g. GET /api/modules for current user).
  * @param {string} moduleName - e.g. 'client', 'cases', 'role', 'user'
- * @param {{ includeAssignee?: boolean }} [options] - includeAssignee: true only for SUPER_ADMIN
+ * @param {{
+ *   includeAssignee?: boolean,
+ *   assigneeClient?: boolean,
+ *   assigneeCases?: boolean
+ * }} [options]
  * @returns {string[]}
  */
 exports.getActionsForModule = (moduleName, options = {}) => {
     const name = (moduleName || '').toLowerCase().trim();
-    const includeAssignee = options.includeAssignee === true;
-    if (MODULES_WITH_ASSIGNEE.includes(name) && includeAssignee) {
+    const superInclude = options.includeAssignee === true;
+    let showAssignee = false;
+    if (MODULES_WITH_ASSIGNEE.includes(name)) {
+        if (superInclude) {
+            showAssignee = true;
+        } else if (name === 'client' && options.assigneeClient === true) {
+            showAssignee = true;
+        } else if (name === 'cases' && options.assigneeCases === true) {
+            showAssignee = true;
+        }
+    }
+    if (showAssignee) {
         return [...BASE_ACTIONS, ASSIGNEE_ACTION];
     }
     return [...BASE_ACTIONS];
