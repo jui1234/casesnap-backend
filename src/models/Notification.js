@@ -27,7 +27,11 @@ const NotificationSchema = new mongoose.Schema({
         trim: true,
         enum: [
             'client_created',
+            'client_bulk_imported',
+            'client_assigned',
             'case_created',
+            'case_bulk_imported',
+            'case_assigned',
             'case_stage_needs_confirmation',
             'case_stage_reminder_5_days',
             'case_stage_reminder_2_days',

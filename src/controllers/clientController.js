@@ -314,6 +314,23 @@ exports.bulkAssignClients = asyncHandler(async (req, res, next) => {
             totalMatched += matchedCount;
             totalModified += modifiedCount;
 
+            if (targetAssignedTo && modifiedCount > 0) {
+                try {
+                    await Notification.create({
+                        userId: targetAssignedTo,
+                        organization: organizationId,
+                        type: 'client_assigned',
+                        title: 'Clients assigned to you',
+                        message: `${modifiedCount} client(s) have been assigned to you.`,
+                        relatedEntityType: 'client',
+                        relatedEntityId: null,
+                        createdBy: updatedByStr
+                    });
+                } catch (notifErr) {
+                    console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
+                }
+            }
+
             groupResults.push({
                 groupIndex: i,
                 assignedTo: targetAssignedTo,
@@ -406,6 +423,23 @@ exports.bulkAssignClients = asyncHandler(async (req, res, next) => {
     const matchedCount = updateResult.matchedCount ?? updateResult.nMatched ?? matchedIds.length;
     const modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
     const missingIds = uniqueIds.filter((id) => !matchedSet.has(id));
+
+    if (targetAssignedTo && modifiedCount > 0) {
+        try {
+            await Notification.create({
+                userId: targetAssignedTo,
+                organization: organizationId,
+                type: 'client_assigned',
+                title: 'Clients assigned to you',
+                message: `${modifiedCount} client(s) have been assigned to you.`,
+                relatedEntityType: 'client',
+                relatedEntityId: null,
+                createdBy: updatedByStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
+        }
+    }
 
     return res.status(200).json({
         success: true,

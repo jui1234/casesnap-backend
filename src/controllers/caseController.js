@@ -644,6 +644,23 @@ exports.bulkAssignCases = asyncHandler(async (req, res, next) => {
             totalMatched += matchedCount;
             totalModified += modifiedCount;
 
+            if (targetAssignedTo && modifiedCount > 0) {
+                try {
+                    await Notification.create({
+                        userId: targetAssignedTo,
+                        organization: organizationId,
+                        type: 'case_assigned',
+                        title: 'Cases assigned to you',
+                        message: `${modifiedCount} case(s) have been assigned to you.`,
+                        relatedEntityType: 'case',
+                        relatedEntityId: null,
+                        createdBy: updatedByStr
+                    });
+                } catch (notifErr) {
+                    console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+                }
+            }
+
             groupResults.push({
                 groupIndex: i,
                 assignedTo: targetAssignedTo,
@@ -737,6 +754,23 @@ exports.bulkAssignCases = asyncHandler(async (req, res, next) => {
     const modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
     const missingIds = uniqueIds.filter((id) => !matchedSet.has(id));
 
+    if (targetAssignedTo && modifiedCount > 0) {
+        try {
+            await Notification.create({
+                userId: targetAssignedTo,
+                organization: organizationId,
+                type: 'case_assigned',
+                title: 'Cases assigned to you',
+                message: `${modifiedCount} case(s) have been assigned to you.`,
+                relatedEntityType: 'case',
+                relatedEntityId: null,
+                createdBy: updatedByStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+        }
+    }
+
     return res.status(200).json({
         success: true,
         message: 'Bulk assign completed',
@@ -767,6 +801,7 @@ exports.getCases = asyncHandler(async (req, res, next) => {
         limit = 10,
         status,
         assignedTo,
+        assignmentFilter,
         search,
         caseType,
         caseNumber,
@@ -790,6 +825,12 @@ exports.getCases = asyncHandler(async (req, res, next) => {
 
     if (assignedTo) {
         query.assignedTo = assignedTo;
+    }
+
+    if (assignmentFilter === 'assigned') {
+        query.assignedTo = { $ne: null };
+    } else if (assignmentFilter === 'unassigned') {
+        query.assignedTo = null;
     }
 
     if (caseType && String(caseType).trim()) {
@@ -1158,6 +1199,7 @@ exports.exportCasesToExcel = asyncHandler(async (req, res) => {
     const {
         status,
         assignedTo,
+        assignmentFilter,
         search,
         caseType,
         caseNumber,
@@ -1172,6 +1214,8 @@ exports.exportCasesToExcel = asyncHandler(async (req, res) => {
 
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
+    if (assignmentFilter === 'assigned') query.assignedTo = { $ne: null };
+    else if (assignmentFilter === 'unassigned') query.assignedTo = null;
     if (caseType && String(caseType).trim()) query.caseType = { $regex: String(caseType).trim(), $options: 'i' };
     if (caseNumber && String(caseNumber).trim()) query.caseNumber = { $regex: String(caseNumber).trim(), $options: 'i' };
     if (search) {
@@ -1636,6 +1680,9 @@ exports.addCaseStage = asyncHandler(async (req, res, next) => {
     const beforeLen = caseDoc.stages.length;
     caseDoc.stages.push(...stagesToInsert);
 
+    // Capture plain string IDs before populate replaces them with User documents
+    const confirmedByIds = stagesToInsert.map((s) => String(s.confirmedBy));
+
     caseDoc.updatedBy = userId;
     await caseDoc.save();
     await caseDoc.populate('stages.confirmedBy', STAGE_CONFIRM_USER_SELECT);
@@ -1644,13 +1691,13 @@ exports.addCaseStage = asyncHandler(async (req, res, next) => {
 
     // Notify confirmedBy users to confirm stage(s)
     try {
-        for (const stage of createdStages) {
+        for (let i = 0; i < createdStages.length; i++) {
             await Notification.create({
-                userId: stage.confirmedBy.toString(),
+                userId: confirmedByIds[i],
                 organization: organizationId,
                 type: 'case_stage_needs_confirmation',
                 title: 'Stage needs confirmation',
-                message: `${caseDoc.caseNumber || caseDoc._id} - Please confirm stage: ${stage.stageName}`,
+                message: `${caseDoc.caseNumber || caseDoc._id} - Please confirm stage: ${createdStages[i].stageName}`,
                 relatedEntityType: 'case',
                 relatedEntityId: caseDoc._id.toString(),
                 createdBy: userId
