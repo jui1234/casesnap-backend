@@ -165,14 +165,15 @@ exports.createClient = asyncHandler(async (req, res, next) => {
         organization: organizationId
     });
 
+    const creatorIdStr = userId.toString();
+    const clientName = [client.firstName, client.lastName].filter(Boolean).join(' ') || 'New client';
+
     // When creator does NOT have assignee permission, notify assignees so they see the new client
     const creatorHasAssignee = req.userRole && canAssignModule(req.userRole, 'client');
     if (!creatorHasAssignee) {
         try {
             const assigneeUserIds = await getAssigneeUserIdsForModule(organizationId, 'client');
-            const creatorIdStr = userId.toString();
             const recipientIds = assigneeUserIds.filter((id) => id !== creatorIdStr);
-            const clientName = [client.firstName, client.lastName].filter(Boolean).join(' ') || 'New client';
             for (const assigneeId of recipientIds) {
                 await Notification.create({
                     userId: assigneeId,
@@ -190,6 +191,24 @@ exports.createClient = asyncHandler(async (req, res, next) => {
             }
         } catch (notifErr) {
             console.error('⚠️ Failed to create assignee notifications:', notifErr.message);
+        }
+    }
+
+    // Notify the assigned user when creator assigns to someone else during creation
+    if (effectiveAssignedTo && String(effectiveAssignedTo) !== creatorIdStr) {
+        try {
+            await Notification.create({
+                userId: String(effectiveAssignedTo),
+                organization: organizationId,
+                type: 'client_assigned',
+                title: 'Client assigned to you',
+                message: `${clientName} has been assigned to you.`,
+                relatedEntityType: 'client',
+                relatedEntityId: client._id.toString(),
+                createdBy: creatorIdStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
         }
     }
 
@@ -471,6 +490,7 @@ exports.getClients = asyncHandler(async (req, res, next) => {
         limit = 10,
         status,
         assignedTo,
+        assignmentFilter,
         search,
         sortBy = 'createdAt',
         sortOrder = 'desc',
@@ -493,6 +513,12 @@ exports.getClients = asyncHandler(async (req, res, next) => {
 
     if (assignedTo) {
         query.assignedTo = assignedTo;
+    }
+
+    if (assignmentFilter === 'assigned') {
+        query.assignedTo = { $ne: null };
+    } else if (assignmentFilter === 'unassigned') {
+        query.assignedTo = null;
     }
 
     // Visibility rule: users without assignee permission can only view their assigned clients.
@@ -620,6 +646,9 @@ exports.updateClient = asyncHandler(async (req, res, next) => {
         }
     }
 
+    // Capture previous assignee before any update so we can detect a change
+    const previousAssignedTo = client.assignedTo ? String(client.assignedTo) : null;
+
     // Update fields
     const updateFields = [
         'firstName', 'lastName', 'email', 'phone', 'alternatePhone',
@@ -638,6 +667,27 @@ exports.updateClient = asyncHandler(async (req, res, next) => {
 
     client.updatedBy = userId;
     await client.save();
+
+    // Notify new assignee when assignment changes to a different user
+    const newAssignedTo = client.assignedTo ? String(client.assignedTo) : null;
+    const updaterIdStr = userId.toString();
+    if (req.body.assignedTo !== undefined && newAssignedTo && newAssignedTo !== previousAssignedTo && newAssignedTo !== updaterIdStr) {
+        try {
+            const clientName = [client.firstName, client.lastName].filter(Boolean).join(' ') || 'A client';
+            await Notification.create({
+                userId: newAssignedTo,
+                organization: organizationId,
+                type: 'client_assigned',
+                title: 'Client assigned to you',
+                message: `${clientName} has been assigned to you.`,
+                relatedEntityType: 'client',
+                relatedEntityId: client._id.toString(),
+                createdBy: updaterIdStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
+        }
+    }
 
     // Populate before sending response
     await client.populate('assignedTo', 'firstName lastName email');
@@ -817,6 +867,7 @@ exports.exportClientsToExcel = asyncHandler(async (req, res) => {
     const {
         status,
         assignedTo,
+        assignmentFilter,
         search,
         includeDeleted = false,
         sortBy = 'createdAt',
@@ -829,6 +880,9 @@ exports.exportClientsToExcel = asyncHandler(async (req, res) => {
 
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
+
+    if (assignmentFilter === 'assigned') query.assignedTo = { $ne: null };
+    else if (assignmentFilter === 'unassigned') query.assignedTo = null;
 
     if (!canViewAllClients(req.userRole)) {
         query.assignedTo = userId;

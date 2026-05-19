@@ -85,6 +85,25 @@ exports.markAsRead = asyncHandler(async (req, res, next) => {
 });
 
 /**
+ * @desc    Get unread notification count for the logged-in user (lightweight, for badge)
+ * @route   GET /api/notifications/unread-count
+ * @access  Private
+ */
+exports.getUnreadCount = asyncHandler(async (req, res, next) => {
+    const userId = req.user._id.toString();
+    const organizationId = (req.user.organization && req.user.organization._id)
+        ? req.user.organization._id.toString()
+        : (req.user.organization && req.user.organization.toString ? req.user.organization.toString() : req.user.organization);
+
+    const unreadCount = await Notification.countDocuments({ userId, organization: organizationId, read: false });
+
+    res.status(200).json({
+        success: true,
+        unreadCount
+    });
+});
+
+/**
  * @desc    Mark all notifications as read for the logged-in user
  * @route   PATCH /api/notifications/read-all
  * @access  Private
