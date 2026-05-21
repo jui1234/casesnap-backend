@@ -525,6 +525,25 @@ exports.createCase = asyncHandler(async (req, res, next) => {
         }
     }
 
+    // Notify the assigned user when creator assigns to someone else during creation
+    if (effectiveAssignedTo && String(effectiveAssignedTo) !== userId.toString()) {
+        try {
+            const caseLabel = newCase.caseNumber || 'New case';
+            await Notification.create({
+                userId: String(effectiveAssignedTo),
+                organization: organizationId,
+                type: 'case_assigned',
+                title: 'Case assigned to you',
+                message: `${caseLabel} (${newCase.partyName}) has been assigned to you.`,
+                relatedEntityType: 'case',
+                relatedEntityId: newCase._id.toString(),
+                createdBy: userId.toString()
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+        }
+    }
+
     await newCase.populate('assignedTo', 'firstName lastName email');
     await newCase.populate('createdBy', 'firstName lastName email');
     await newCase.populate('clients', 'firstName lastName email phone');
@@ -999,6 +1018,8 @@ exports.updateCase = asyncHandler(async (req, res, next) => {
         caseDoc.clients = newClients;
     }
 
+    const previousAssignedTo = caseDoc.assignedTo ? String(caseDoc.assignedTo) : null;
+
     const updateFields = [
         'caseNumber', 'caseType', 'partyName', 'courtName', 'courtPremises',
         'assignedTo', 'status', 'notes'
@@ -1013,6 +1034,27 @@ exports.updateCase = asyncHandler(async (req, res, next) => {
 
     caseDoc.updatedBy = userId;
     await caseDoc.save();
+
+    // Notify new assignee when assignment changes to a different user
+    const newAssignedTo = caseDoc.assignedTo ? String(caseDoc.assignedTo) : null;
+    const updaterIdStr = userId.toString();
+    if (req.body.assignedTo !== undefined && newAssignedTo && newAssignedTo !== previousAssignedTo && newAssignedTo !== updaterIdStr) {
+        try {
+            const caseLabel = caseDoc.caseNumber || String(caseDoc._id);
+            await Notification.create({
+                userId: newAssignedTo,
+                organization: organizationId,
+                type: 'case_assigned',
+                title: 'Case assigned to you',
+                message: `${caseLabel} (${caseDoc.partyName}) has been assigned to you.`,
+                relatedEntityType: 'case',
+                relatedEntityId: caseDoc._id.toString(),
+                createdBy: updaterIdStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+        }
+    }
 
     await caseDoc.populate('assignedTo', 'firstName lastName email');
     await caseDoc.populate('createdBy', 'firstName lastName email');
