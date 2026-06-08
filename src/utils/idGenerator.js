@@ -89,6 +89,14 @@ const generateNotificationId = () => {
 };
 
 /**
+ * Generate subscription ID
+ * @returns {String} subscription_xxxxx
+ */
+const generateSubscriptionId = () => {
+    return generateCustomId('subscription');
+};
+
+/**
  * Validate custom ID format
  * @param {String} id - ID to validate
  * @param {String} expectedPrefix - Expected prefix
@@ -111,6 +119,7 @@ module.exports = {
     generateCaseNumber,
     generateModuleId,
     generateNotificationId,
+    generateSubscriptionId,
     isValidCustomId,
     generateId: generateCustomId // Alias for Module model
 };
