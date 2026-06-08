@@ -13,6 +13,7 @@ const roleRoutes = require('./routes/roleRoutes');
 const moduleRoutes = require('./routes/moduleRoutes');
 const userRoutes = require('./routes/userRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const exampleRoutes = require('./routes/exampleRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const errorHandler = require('./middleware/error');
@@ -124,6 +125,7 @@ app.use('/api/roles', roleRoutes);
 app.use('/api/modules', moduleRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/example', exampleRoutes);
 app.use('/api/upload', uploadRoutes);
 

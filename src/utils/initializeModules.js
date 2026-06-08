@@ -29,6 +29,11 @@ exports.initializeDefaultModules = async () => {
                 name: 'user',
                 displayName: 'User',
                 description: 'User management module'
+            },
+            {
+                name: 'subscription',
+                displayName: 'Subscription',
+                description: 'Subscription management module'
             }
         ];
 

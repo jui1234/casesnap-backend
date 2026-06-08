@@ -79,6 +79,140 @@ exports.login = asyncHandler(async (req, res, next) => {
     // 6c. Subscription validation (blocked if expired/inactive/cancelled)
     const subscriptionCheck = validateOrganizationSubscription(user.organization);
     if (!subscriptionCheck.valid) {
+        // If subscription specifically expired, include canManageSubscription flag with user details
+        const expiredMessage = 'Your subscription plan has expired. Please renew your plan to continue.';
+        if (subscriptionCheck.reason === expiredMessage) {
+            // Determine if the user is a SUPER_ADMIN (priority 1 and system role)
+            let isSuperAdmin = false;
+            if (userType === 'admin') {
+                if (user.role && typeof user.role === 'object' && user.role.priority !== undefined && user.role.isSystemRole !== undefined) {
+                    isSuperAdmin = (user.role.priority === 1 && user.role.isSystemRole === true);
+                } else {
+                    // Role might be stored as an id/string — attempt to load minimal role info
+                    const Role = require('../models/Role');
+                    let roleId = user.role;
+                    if (Buffer.isBuffer(roleId)) roleId = roleId.toString('hex');
+                    if (typeof roleId === 'string' && roleId) {
+                        const role = await Role.findById(roleId).select('priority isSystemRole');
+                        if (role) isSuperAdmin = (role.priority === 1 && role.isSystemRole === true);
+                    }
+                }
+            }
+
+            // Create token for subscription expired response (same as successful login)
+            let respRoleId = userType;
+            if (userType === 'admin' && user.role) {
+                if (typeof user.role === 'object' && user.role._id) {
+                    respRoleId = user.role._id;
+                } else if (typeof user.role === 'string') {
+                    respRoleId = user.role;
+                } else if (Buffer.isBuffer(user.role)) {
+                    respRoleId = user.role.toString('hex');
+                }
+            }
+            
+            const tokenPayload = {
+                id: user._id,
+                email: user.email,
+                organization: user.organization?._id || user.organization,
+                role: respRoleId
+            };
+            
+            const expiredToken = jwt.sign(
+                tokenPayload,
+                process.env.JWT_SECRET,
+                { expiresIn: process.env.JWT_EXPIRE || '30d' }
+            );
+
+            // Prepare user response data
+            let userData;
+
+            if (userType === 'employee') {
+                userData = {
+                    id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    email: user.email,
+                    phone: user.phone,
+                    address: user.address,
+                    gender: user.gender,
+                    dateOfBirth: user.dateOfBirth,
+                    age: user.age,
+                    aadharCardNumber: user.aadharCardNumber,
+                    employeeType: user.employeeType,
+                    advocateLicenseNumber: user.advocateLicenseNumber,
+                    internYear: user.internYear,
+                    salary: user.salary,
+                    department: user.department,
+                    position: user.position,
+                    startDate: user.startDate,
+                    emergencyContactName: user.emergencyContactName,
+                    emergencyContactPhone: user.emergencyContactPhone,
+                    emergencyContactRelation: user.emergencyContactRelation,
+                    organization: user.organization,
+                    adminId: user.adminId,
+                    status: user.status,
+                    role: 'employee',
+                    subscriptionPlan: user.organization?.subscriptionPlan || null,
+                    subscriptionStatus: user.organization?.subscriptionStatus || 'active',
+                    subscriptionExpiresAt: user.organization?.subscriptionExpiresAt || null,
+                    createdAt: user.createdAt
+                };
+            } else {
+                // Ensure role is populated for admin users
+                if (user.role && (!user.role.name || typeof user.role === 'string' || Buffer.isBuffer(user.role))) {
+                    const Role = require('../models/Role');
+                    let roleId = user.role;
+                    if (Buffer.isBuffer(roleId)) {
+                        roleId = roleId.toString('hex');
+                    } else if (typeof roleId === 'object' && roleId.toString) {
+                        roleId = roleId.toString();
+                    }
+                    if (roleId) {
+                        const role = await Role.findById(roleId);
+                        if (role) {
+                            user.role = role;
+                        }
+                    }
+                }
+
+                userData = {
+                    id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    email: user.email,
+                    organizationId: user.organization?._id || user.organization || null,
+                    subscriptionPlan: user.organization?.subscriptionPlan || null,
+                    subscriptionStatus: user.organization?.subscriptionStatus || 'active',
+                    subscriptionExpiresAt: user.organization?.subscriptionExpiresAt || null
+                };
+
+                // Add role details if available
+                if (user.role && typeof user.role === 'object' && user.role.name) {
+                    const permissions = await getEffectivePermissionsForRole(user.role);
+                    userData.role = {
+                        id: user.role._id,
+                        name: user.role.name,
+                        priority: user.role.priority,
+                        permissions,
+                        isSystemRole: user.role.isSystemRole || false,
+                        description: user.role.description || null
+                    };
+                    userData.assigneePermissions = getAssigneePermissionsForRole(user.role);
+                } else {
+                    userData.assigneePermissions = { canAssignClient: false, canAssignCase: false };
+                }
+            }
+
+            return res.status(403).json({
+                success: false,
+                error: subscriptionCheck.reason,
+                token: expiredToken,
+                canManageSubscription: !!isSuperAdmin,
+                user: userData
+            });
+        }
+
         return next(new ErrorResponse(subscriptionCheck.reason, 403));
     }
 
