@@ -124,9 +124,15 @@ exports.login = asyncHandler(async (req, res, next) => {
                 { expiresIn: process.env.JWT_EXPIRE || '30d' }
             );
 
-            // Prepare user response data
-            let userData;
+            if (!isSuperAdmin) {
+                return res.status(403).json({
+                    success: false,
+                    error: subscriptionCheck.reason
+                });
+            }
 
+            // Only build full login-like response when user can manage subscription
+            let userData;
             if (userType === 'employee') {
                 userData = {
                     id: user._id,
@@ -187,9 +193,16 @@ exports.login = asyncHandler(async (req, res, next) => {
                     subscriptionExpiresAt: user.organization?.subscriptionExpiresAt || null
                 };
 
-                // Add role details if available
                 if (user.role && typeof user.role === 'object' && user.role.name) {
-                    const permissions = await getEffectivePermissionsForRole(user.role);
+                    let permissions = await getEffectivePermissionsForRole(user.role);
+                    if (isSuperAdmin) {
+                        permissions = [
+                            {
+                                module: 'subscription',
+                                actions: ['create', 'read', 'update', 'delete']
+                            }
+                        ];
+                    }
                     userData.role = {
                         id: user.role._id,
                         name: user.role.name,
@@ -208,7 +221,7 @@ exports.login = asyncHandler(async (req, res, next) => {
                 success: false,
                 error: subscriptionCheck.reason,
                 token: expiredToken,
-                canManageSubscription: !!isSuperAdmin,
+                canManageSubscription: true,
                 user: userData
             });
         }

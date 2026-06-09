@@ -5,7 +5,7 @@ const Module = require('../models/Module');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
 const { getActionsForModule } = require('../utils/roleUtils');
-const { getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
+const { validateOrganizationSubscription } = require('../utils/subscriptionUtils');
 
 /**
  * @desc    Get all active modules (with allowed actions). Includes `assignee` on client/cases when
@@ -14,20 +14,33 @@ const { getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
  * @access  Public; optional Bearer token refines actions for the signed-in user
  */
 exports.getModules = asyncHandler(async (req, res, next) => {
-    let actionOpts = { assigneeClient: false, assigneeCases: false };
+    let includeAssignee = false;
+    let onlySubscriptionModule = false;
+
     if (req.user) {
         await req.user.populate({
             path: 'role',
             select: 'name priority isSystemRole permissions'
         });
         const role = req.user.role;
-        if (role) {
-            const { canAssignClient, canAssignCase } = getAssigneePermissionsForRole(role);
-            actionOpts = { assigneeClient: canAssignClient, assigneeCases: canAssignCase };
+        const isSuperAdmin = role && role.priority === 1 && role.isSystemRole === true;
+
+        if (isSuperAdmin) {
+            includeAssignee = true;
+            const subscriptionCheck = validateOrganizationSubscription(req.user.organization);
+            const expiredMessage = 'Your subscription plan has expired. Please renew your plan to continue.';
+            if (!subscriptionCheck.valid && subscriptionCheck.reason === expiredMessage) {
+                onlySubscriptionModule = true;
+            }
         }
     }
 
-    const modules = await Module.find({ isActive: true })
+    const query = { isActive: true };
+    if (onlySubscriptionModule) {
+        query.name = 'subscription';
+    }
+
+    const modules = await Module.find(query)
         .select('_id name displayName description')
         .sort({ name: 1 })
         .lean();
