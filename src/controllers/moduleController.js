@@ -8,16 +8,20 @@ const { getActionsForModule } = require('../utils/roleUtils');
 const { validateOrganizationSubscription } = require('../utils/subscriptionUtils');
 
 /**
- * @desc    Get all active modules (with allowed actions). Assignee action only if current user is SUPER_ADMIN.
+ * @desc    Get all active modules (with allowed actions). Includes `assignee` on client/cases when
+ *          the current user’s role has assignee on that module (or SUPER_ADMIN). Unauthenticated: no assignee.
  * @route   GET /api/modules
- * @access  Public; send Bearer token to get assignee for SUPER_ADMIN only
+ * @access  Public; optional Bearer token refines actions for the signed-in user
  */
 exports.getModules = asyncHandler(async (req, res, next) => {
     let includeAssignee = false;
     let onlySubscriptionModule = false;
 
     if (req.user) {
-        await req.user.populate({ path: 'role', select: 'priority isSystemRole' });
+        await req.user.populate({
+            path: 'role',
+            select: 'name priority isSystemRole permissions'
+        });
         const role = req.user.role;
         const isSuperAdmin = role && role.priority === 1 && role.isSystemRole === true;
 
@@ -46,7 +50,7 @@ exports.getModules = asyncHandler(async (req, res, next) => {
         name: m.name,
         displayName: m.displayName,
         description: m.description,
-        actions: getActionsForModule(m.name, { includeAssignee })
+        actions: getActionsForModule(m.name, actionOpts)
     }));
 
     res.status(200).json({

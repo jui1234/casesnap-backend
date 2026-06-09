@@ -5,11 +5,43 @@ const Client = require('../models/Client');
 const Notification = require('../models/Notification');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
-const { canAssignModule, getAssigneeUserIdsForModule } = require('../utils/assigneeUtils');
+const {
+    canAssignModule,
+    getAssigneeUserIdsForModule,
+    assertAssignableUserInOrg
+} = require('../utils/assigneeUtils');
 const { sendEncryptedJson } = require('../utils/responseEncryption');
 const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber, toOptionalDate, formatMongooseErrorForUser } = require('../utils/excelUtils');
 
 const canViewAllClients = (userRole) => canAssignModule(userRole, 'client');
+
+const CLIENT_LIST_SEARCH_FIELDS = ['firstName', 'lastName', 'email', 'phone', 'companyName'];
+
+function escapeRegexLiteral(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Multi-word search (e.g. URL `search=rohan+gupta` → "rohan gupta") matches across name fields. */
+function applyClientListSearchToQuery(query, search) {
+    const trimmed = String(search ?? '').trim();
+    if (!trimmed) return;
+
+    const tokens = trimmed.split(/\s+/).map((t) => escapeRegexLiteral(t)).filter(Boolean);
+    if (tokens.length === 0) return;
+
+    const orClauseForToken = (token) => ({
+        $or: CLIENT_LIST_SEARCH_FIELDS.map((field) => ({
+            [field]: { $regex: token, $options: 'i' }
+        }))
+    });
+
+    if (tokens.length === 1) {
+        query.$or = orClauseForToken(tokens[0]).$or;
+        return;
+    }
+
+    query.$and = [...(query.$and || []), ...tokens.map(orClauseForToken)];
+}
 
 const CLIENT_EXCEL_SHEET = 'Clients';
 const CLIENT_GENDER_ENUM = Client.schema?.path('gender')?.enumValues || ['Male', 'Female', 'Other', 'Prefer not to say'];
@@ -94,6 +126,10 @@ exports.createClient = asyncHandler(async (req, res, next) => {
         if (String(effectiveAssignedTo) !== String(userId) && req.userRole && !canAssignModule(req.userRole, 'client')) {
             return next(new ErrorResponse('You do not have permission to assign clients to other users', 403));
         }
+        const assigneeCheck = await assertAssignableUserInOrg(organizationId, effectiveAssignedTo);
+        if (assigneeCheck && assigneeCheck.error) {
+            return next(new ErrorResponse(assigneeCheck.error, 400));
+        }
     }
 
     // Create client
@@ -129,14 +165,15 @@ exports.createClient = asyncHandler(async (req, res, next) => {
         organization: organizationId
     });
 
+    const creatorIdStr = userId.toString();
+    const clientName = [client.firstName, client.lastName].filter(Boolean).join(' ') || 'New client';
+
     // When creator does NOT have assignee permission, notify assignees so they see the new client
     const creatorHasAssignee = req.userRole && canAssignModule(req.userRole, 'client');
     if (!creatorHasAssignee) {
         try {
             const assigneeUserIds = await getAssigneeUserIdsForModule(organizationId, 'client');
-            const creatorIdStr = userId.toString();
             const recipientIds = assigneeUserIds.filter((id) => id !== creatorIdStr);
-            const clientName = [client.firstName, client.lastName].filter(Boolean).join(' ') || 'New client';
             for (const assigneeId of recipientIds) {
                 await Notification.create({
                     userId: assigneeId,
@@ -157,10 +194,286 @@ exports.createClient = asyncHandler(async (req, res, next) => {
         }
     }
 
+    // Notify the assigned user when creator assigns to someone else during creation
+    if (effectiveAssignedTo && String(effectiveAssignedTo) !== creatorIdStr) {
+        try {
+            await Notification.create({
+                userId: String(effectiveAssignedTo),
+                organization: organizationId,
+                type: 'client_assigned',
+                title: 'Client assigned to you',
+                message: `${clientName} has been assigned to you.`,
+                relatedEntityType: 'client',
+                relatedEntityId: client._id.toString(),
+                createdBy: creatorIdStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
+        }
+    }
+
     res.status(201).json({
         success: true,
         message: 'Client created successfully',
         data: client
+    });
+});
+
+const MAX_BULK_ASSIGN_CLIENTS = 2000;
+
+function normalizeClientIdList(rawIds) {
+    return [...new Set((rawIds || []).map((id) => String(id ?? '').trim()).filter(Boolean))];
+}
+
+/**
+ * @desc    Bulk assign clients to user(s) (or unassign). SUPER_ADMIN or client-module assignees only.
+ * @route   POST /api/clients/bulk-assign
+ * @access  Private — `client` read + client assignee (see rbac.requireClientBulkAssignAccess)
+ * @body    Mode A — one assignee for many clients:
+ *          { clientIds: string[], assignedTo?: string | null }
+ *          Mode B — many assignees in one request (each group: many clients → one user):
+ *          { groups: Array<{ clientIds: string[], assignedTo?: string | null }> }
+ *          Use `assignedTo: null` or omit to clear assignment for that group. Each client may appear in only one group.
+ */
+exports.bulkAssignClients = asyncHandler(async (req, res, next) => {
+    const organizationId = req.user.organization;
+    const userId = req.user._id;
+    const updatedByStr = userId && userId.toString ? userId.toString() : String(userId);
+
+    const { clientIds, assignedTo, groups } = req.body;
+
+    const useGroups = Array.isArray(groups) && groups.length > 0;
+
+    if (useGroups) {
+        const seenClients = new Set();
+        const normalizedGroups = [];
+
+        for (let i = 0; i < groups.length; i++) {
+            const g = groups[i] || {};
+            const ids = normalizeClientIdList(g.clientIds);
+            if (ids.length === 0) {
+                return next(new ErrorResponse(`groups[${i}].clientIds must contain at least one client ID`, 400));
+            }
+            for (const id of ids) {
+                if (seenClients.has(id)) {
+                    return next(
+                        new ErrorResponse(
+                            `Each client can only appear once across groups (duplicate: ${id})`,
+                            400
+                        )
+                    );
+                }
+                seenClients.add(id);
+            }
+            normalizedGroups.push({ clientIds: ids, assignedTo: g.assignedTo });
+        }
+
+        if (seenClients.size > MAX_BULK_ASSIGN_CLIENTS) {
+            return next(new ErrorResponse(`At most ${MAX_BULK_ASSIGN_CLIENTS} distinct clients per request`, 400));
+        }
+
+        const assigneeIdsToCheck = new Set();
+        for (const g of normalizedGroups) {
+            if (g.assignedTo !== undefined && g.assignedTo !== null && String(g.assignedTo).trim() !== '') {
+                assigneeIdsToCheck.add(String(g.assignedTo).trim());
+            }
+        }
+
+        for (const aid of assigneeIdsToCheck) {
+            const check = await assertAssignableUserInOrg(organizationId, aid);
+            if (check.error) return next(new ErrorResponse(`${check.error} (userId: ${aid})`, 400));
+        }
+
+        const groupResults = [];
+        let totalRequested = 0;
+        let totalMatched = 0;
+        let totalModified = 0;
+
+        for (let i = 0; i < normalizedGroups.length; i++) {
+            const { clientIds: gIds, assignedTo: gAssign } = normalizedGroups[i];
+            totalRequested += gIds.length;
+
+            let targetAssignedTo = null;
+            if (gAssign !== undefined && gAssign !== null && String(gAssign).trim() !== '') {
+                targetAssignedTo = String(gAssign).trim();
+            }
+
+            const existing = await Client.find({
+                _id: { $in: gIds },
+                organization: organizationId,
+                deletedAt: null
+            })
+                .select('_id')
+                .lean();
+
+            const matchedIds = existing.map((c) => c._id.toString());
+            const matchedSet = new Set(matchedIds);
+            const missingIds = gIds.filter((id) => !matchedSet.has(id));
+
+            let matchedCount = 0;
+            let modifiedCount = 0;
+            if (matchedIds.length > 0) {
+                const updateResult = await Client.updateMany(
+                    {
+                        _id: { $in: matchedIds },
+                        organization: organizationId,
+                        deletedAt: null
+                    },
+                    {
+                        $set: {
+                            assignedTo: targetAssignedTo,
+                            updatedBy: updatedByStr
+                        }
+                    }
+                );
+                matchedCount = updateResult.matchedCount ?? updateResult.nMatched ?? matchedIds.length;
+                modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
+            }
+
+            totalMatched += matchedCount;
+            totalModified += modifiedCount;
+
+            if (targetAssignedTo && modifiedCount > 0) {
+                try {
+                    await Notification.create({
+                        userId: targetAssignedTo,
+                        organization: organizationId,
+                        type: 'client_assigned',
+                        title: 'Clients assigned to you',
+                        message: `${modifiedCount} client(s) have been assigned to you.`,
+                        relatedEntityType: 'client',
+                        relatedEntityId: null,
+                        createdBy: updatedByStr
+                    });
+                } catch (notifErr) {
+                    console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
+                }
+            }
+
+            groupResults.push({
+                groupIndex: i,
+                assignedTo: targetAssignedTo,
+                requested: gIds.length,
+                matched: matchedCount,
+                modified: modifiedCount,
+                missingIds:
+                    missingIds.length <= 50
+                        ? missingIds
+                        : missingIds.slice(0, 50).concat([`(+${missingIds.length - 50} more not listed)`])
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: 'Bulk assign completed (grouped)',
+            data: {
+                mode: 'groups',
+                groupCount: normalizedGroups.length,
+                requested: totalRequested,
+                matched: totalMatched,
+                modified: totalModified,
+                groups: groupResults
+            }
+        });
+    }
+
+    if (!Array.isArray(clientIds) || clientIds.length === 0) {
+        return next(
+            new ErrorResponse(
+                'Send either { clientIds, assignedTo } for one assignee, or { groups: [{ clientIds, assignedTo }, ...] } for multiple assignees',
+                400
+            )
+        );
+    }
+    if (clientIds.length > MAX_BULK_ASSIGN_CLIENTS) {
+        return next(new ErrorResponse(`At most ${MAX_BULK_ASSIGN_CLIENTS} clients per request`, 400));
+    }
+
+    const uniqueIds = normalizeClientIdList(clientIds);
+    if (uniqueIds.length === 0) {
+        return next(new ErrorResponse('clientIds must contain at least one valid client ID', 400));
+    }
+
+    const assigneeCheck = await assertAssignableUserInOrg(organizationId, assignedTo);
+    if (assigneeCheck && assigneeCheck.error) {
+        return next(new ErrorResponse(assigneeCheck.error, 400));
+    }
+    const targetAssignedTo = assigneeCheck ? assigneeCheck.assignedTo : null;
+
+    const existing = await Client.find({
+        _id: { $in: uniqueIds },
+        organization: organizationId,
+        deletedAt: null
+    })
+        .select('_id')
+        .lean();
+
+    const matchedIds = existing.map((c) => c._id.toString());
+    const matchedSet = new Set(matchedIds);
+
+    if (matchedIds.length === 0) {
+        return res.status(200).json({
+            success: true,
+            message: 'No matching clients updated',
+            data: {
+                mode: 'single',
+                requested: uniqueIds.length,
+                matched: 0,
+                modified: 0,
+                missingIds: uniqueIds.slice(0, 100)
+            }
+        });
+    }
+
+    const updateResult = await Client.updateMany(
+        {
+            _id: { $in: matchedIds },
+            organization: organizationId,
+            deletedAt: null
+        },
+        {
+            $set: {
+                assignedTo: targetAssignedTo,
+                updatedBy: updatedByStr
+            }
+        }
+    );
+
+    const matchedCount = updateResult.matchedCount ?? updateResult.nMatched ?? matchedIds.length;
+    const modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
+    const missingIds = uniqueIds.filter((id) => !matchedSet.has(id));
+
+    if (targetAssignedTo && modifiedCount > 0) {
+        try {
+            await Notification.create({
+                userId: targetAssignedTo,
+                organization: organizationId,
+                type: 'client_assigned',
+                title: 'Clients assigned to you',
+                message: `${modifiedCount} client(s) have been assigned to you.`,
+                relatedEntityType: 'client',
+                relatedEntityId: null,
+                createdBy: updatedByStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
+        }
+    }
+
+    return res.status(200).json({
+        success: true,
+        message: 'Bulk assign completed',
+        data: {
+            mode: 'single',
+            requested: uniqueIds.length,
+            matched: matchedCount,
+            modified: modifiedCount,
+            assignedTo: targetAssignedTo,
+            missingIds:
+                missingIds.length <= 100
+                    ? missingIds
+                    : missingIds.slice(0, 100).concat([`(+${missingIds.length - 100} more not listed)`])
+        }
     });
 });
 
@@ -177,6 +490,7 @@ exports.getClients = asyncHandler(async (req, res, next) => {
         limit = 10,
         status,
         assignedTo,
+        assignmentFilter,
         search,
         sortBy = 'createdAt',
         sortOrder = 'desc',
@@ -201,19 +515,19 @@ exports.getClients = asyncHandler(async (req, res, next) => {
         query.assignedTo = assignedTo;
     }
 
+    if (assignmentFilter === 'assigned') {
+        query.assignedTo = { $ne: null };
+    } else if (assignmentFilter === 'unassigned') {
+        query.assignedTo = null;
+    }
+
     // Visibility rule: users without assignee permission can only view their assigned clients.
     if (!canViewAllClients(req.userRole)) {
         query.assignedTo = userId;
     }
 
     if (search) {
-        query.$or = [
-            { firstName: { $regex: search, $options: 'i' } },
-            { lastName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { phone: { $regex: search, $options: 'i' } },
-            { companyName: { $regex: search, $options: 'i' } }
-        ];
+        applyClientListSearchToQuery(query, search);
     }
 
     // Pagination
@@ -322,6 +636,19 @@ exports.updateClient = asyncHandler(async (req, res, next) => {
         }
     }
 
+    if (req.body.assignedTo !== undefined) {
+        const rawAssigned = req.body.assignedTo;
+        if (rawAssigned !== null && String(rawAssigned).trim() !== '') {
+            const assigneeCheck = await assertAssignableUserInOrg(organizationId, rawAssigned);
+            if (assigneeCheck && assigneeCheck.error) {
+                return next(new ErrorResponse(assigneeCheck.error, 400));
+            }
+        }
+    }
+
+    // Capture previous assignee before any update so we can detect a change
+    const previousAssignedTo = client.assignedTo ? String(client.assignedTo) : null;
+
     // Update fields
     const updateFields = [
         'firstName', 'lastName', 'email', 'phone', 'alternatePhone',
@@ -340,6 +667,27 @@ exports.updateClient = asyncHandler(async (req, res, next) => {
 
     client.updatedBy = userId;
     await client.save();
+
+    // Notify new assignee when assignment changes to a different user
+    const newAssignedTo = client.assignedTo ? String(client.assignedTo) : null;
+    const updaterIdStr = userId.toString();
+    if (req.body.assignedTo !== undefined && newAssignedTo && newAssignedTo !== previousAssignedTo && newAssignedTo !== updaterIdStr) {
+        try {
+            const clientName = [client.firstName, client.lastName].filter(Boolean).join(' ') || 'A client';
+            await Notification.create({
+                userId: newAssignedTo,
+                organization: organizationId,
+                type: 'client_assigned',
+                title: 'Client assigned to you',
+                message: `${clientName} has been assigned to you.`,
+                relatedEntityType: 'client',
+                relatedEntityId: client._id.toString(),
+                createdBy: updaterIdStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create client_assigned notification:', notifErr.message);
+        }
+    }
 
     // Populate before sending response
     await client.populate('assignedTo', 'firstName lastName email');
@@ -519,6 +867,7 @@ exports.exportClientsToExcel = asyncHandler(async (req, res) => {
     const {
         status,
         assignedTo,
+        assignmentFilter,
         search,
         includeDeleted = false,
         sortBy = 'createdAt',
@@ -532,18 +881,15 @@ exports.exportClientsToExcel = asyncHandler(async (req, res) => {
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
 
+    if (assignmentFilter === 'assigned') query.assignedTo = { $ne: null };
+    else if (assignmentFilter === 'unassigned') query.assignedTo = null;
+
     if (!canViewAllClients(req.userRole)) {
         query.assignedTo = userId;
     }
 
     if (search) {
-        query.$or = [
-            { firstName: { $regex: search, $options: 'i' } },
-            { lastName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { phone: { $regex: search, $options: 'i' } },
-            { companyName: { $regex: search, $options: 'i' } }
-        ];
+        applyClientListSearchToQuery(query, search);
     }
 
     const findOptions = showDeleted ? { includeDeleted: true } : {};

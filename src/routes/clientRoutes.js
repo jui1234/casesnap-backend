@@ -15,11 +15,12 @@ const {
     downloadClientExcelTemplate,
     exportClientsToExcel,
     importClientsFromExcel,
-    previewClientsExcelImport
+    previewClientsExcelImport,
+    bulkAssignClients
 } = require('../controllers/clientController');
 
 const { protect } = require('../middleware/auth');
-const { loadUserRole, checkPermission } = require('../middleware/rbac');
+const { loadUserRole, checkPermission, requireClientBulkAssignAccess } = require('../middleware/rbac');
 
 // All routes require authentication and role loading
 router.use(protect);
@@ -64,6 +65,8 @@ router.post('/excel/import', checkPermission('client', 'create'), excelUpload.fi
     { name: 'excel', maxCount: 1 },
     { name: 'upload', maxCount: 1 }
 ]), normalizeExcelFile, importClientsFromExcel);
+
+router.post('/bulk-assign', checkPermission('client', 'read'), requireClientBulkAssignAccess, bulkAssignClients);
 
 router.get('/:id', checkPermission('client', 'read'), getClient);
 router.put('/:id', checkPermission('client', 'update'), updateClient);

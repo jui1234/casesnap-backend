@@ -1,18 +1,30 @@
 // controllers/caseController.js
 // Case CRUD operations with RBAC
 
+const mongoose = require('mongoose');
+const { generateClientId } = require('../utils/idGenerator');
 const Case = require('../models/Case');
 const Client = require('../models/Client');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
-const { canAssignModule, getAssigneeUserIdsForModule } = require('../utils/assigneeUtils');
+const {
+    canAssignModule,
+    getAssigneeUserIdsForModule,
+    assertAssignableUserInOrg
+} = require('../utils/assigneeUtils');
 const { sendEncryptedJson } = require('../utils/responseEncryption');
 const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber, formatMongooseErrorForUser } = require('../utils/excelUtils');
 
 const canViewAllCases = (userRole) => canAssignModule(userRole, 'cases');
 const STAGE_CONFIRM_USER_SELECT = '_id firstName lastName email';
+
+const MAX_BULK_ASSIGN_CASES = 2000;
+
+function normalizeCaseIdList(rawIds) {
+    return [...new Set((rawIds || []).map((id) => String(id ?? '').trim()).filter(Boolean))];
+}
 
 const normalizeOrganizationId = (org) => {
     if (!org) return null;
@@ -35,7 +47,14 @@ const isValidDateOrNull = (d) => d === null || (d instanceof Date && !Number.isN
 
 const CASE_EXCEL_SHEET = 'Cases';
 const CASE_COURT_PREMISES_ENUM = Case.schema?.path('courtPremises')?.enumValues || [];
-// One row can represent one case-client link. If caseNumber is provided, duplicate caseNumber rows are merged into one case with multiple clients.
+// One row can represent one case-client link.
+// Merge rows by caseNumber (trimmed) when provided; duplicate caseNumbers become one case with multiple clients.
+// If caseNumber is merged vertically in Excel, only the first row may contain the value — following rows with
+// empty caseNumber but client (or case-side) data still merge into that caseNumber when it appeared above.
+// When caseNumber is empty: rows belong to one case if they share the same caseType+partyName anchor, or if they
+// are continuation rows (client columns and/or notes, court, clientCount, etc.) before the next anchor — blank
+// Excel rows are skipped, so a client on a later row still links to the same case.
+// caseNumber and internal case _id are auto-generated when omitted.
 // For client resolution, provide clientId OR clientPhone OR clientEmail. If none match and you want auto-create,
 // provide required client creation fields.
 const CASE_EXCEL_HEADERS_V2 = [
@@ -59,17 +78,322 @@ const CASE_EXCEL_HEADERS_V2 = [
     'clientFees'
 ];
 
-// Backward compatible: older templates included caseNumber as first column.
+// Template + export + preferred import layout: optional caseNumber first; empty => auto-generated caseNumber.
 const CASE_EXCEL_HEADERS_V1 = ['caseNumber', ...CASE_EXCEL_HEADERS_V2];
 
-function parseCaseExcel(buffer, { sheetName, maxRows } = {}) {
-    const v2 = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_V2, maxRows });
-    if (v2.ok) return { ...v2, version: 2 };
+// Older exports included caseId column; sheet still parses but caseId values are ignored (case _id is always auto-assigned).
+const CASE_EXCEL_HEADERS_LEGACY_EXPORT_WITH_CASE_ID = ['caseId', 'caseNumber', ...CASE_EXCEL_HEADERS_V2];
 
+function parseCaseExcel(buffer, { sheetName, maxRows } = {}) {
     const v1 = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_V1, maxRows });
     if (v1.ok) return { ...v1, version: 1 };
 
-    return v2; // return v2 error by default
+    const v2 = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_V2, maxRows });
+    if (v2.ok) return { ...v2, version: 2 };
+
+    const legacy = parseExcelFromBuffer(buffer, { sheetName, expectedHeaders: CASE_EXCEL_HEADERS_LEGACY_EXPORT_WITH_CASE_ID, maxRows });
+    if (legacy.ok) return { ...legacy, version: 'legacy-export' };
+
+    return v1; // preferred layout error message
+}
+
+/**
+ * Same caseNumber can span multiple rows (one per client). Merged cells / templates often leave
+ * caseType, partyName, etc. blank on continuation rows — only the first physical row has values.
+ * Take the first non-empty value across the group so validation matches what users see in Excel.
+ */
+function firstNonEmptyCaseExcelField(rows, field) {
+    for (const rr of rows) {
+        const s = toSafeString(rr.data[field]).trim();
+        if (s) return s;
+    }
+    return '';
+}
+
+function firstDefinedClientCountInCaseGroup(rows) {
+    for (const rr of rows) {
+        const n = toOptionalNumber(rr.data.clientCount);
+        if (n !== undefined && !Number.isNaN(n)) return n;
+    }
+    return undefined;
+}
+
+/** Stable key when both case type and party name are present (used to merge repeated header rows). */
+function caseExcelImplicitAnchorKey(d) {
+    const t = toSafeString(d.caseType).trim().toLowerCase();
+    const p = toSafeString(d.partyName).trim().toLowerCase();
+    if (!t || !p) return null;
+    return `${t}\0${p}`;
+}
+
+function caseExcelRowHasClientPayload(d) {
+    return !!(
+        toSafeString(d.clientId) ||
+        toSafeString(d.clientPhone) ||
+        toSafeString(d.clientEmail) ||
+        toSafeString(d.clientFirstName) ||
+        toSafeString(d.clientLastName)
+    );
+}
+
+function caseExcelRowHasContinuationFields(d) {
+    return !!(
+        toSafeString(d.stage) ||
+        toSafeString(d.courtName) ||
+        toSafeString(d.courtPremises) ||
+        toSafeString(d.notes) ||
+        toOptionalNumber(d.clientCount) !== undefined
+    );
+}
+
+/**
+ * Build import groups in sheet order.
+ * - Rows with the same caseNumber (trimmed) merge. Continuation rows often leave caseNumber blank after a merged
+ *   cell in Excel — those attach to the most recent row that had a caseNumber if they carry client/continuation data.
+ * - Without caseNumber: implicit groups use caseType+partyName anchor plus continuation rows as before.
+ */
+function buildCaseExcelImportGroups(parsedRows) {
+    const groups = new Map();
+    let implicitGroupKey = null;
+    let implicitAnchorKey = null;
+    /** Most recent physical row's caseNumber; continuation rows with empty caseNumber merge here. */
+    let lastExplicitCaseNumber = null;
+
+    for (const row of parsedRows) {
+        const d = row.data;
+        const r = row.rowNumber;
+        const cn = toSafeString(d.caseNumber).trim();
+
+        if (cn) {
+            implicitGroupKey = null;
+            implicitAnchorKey = null;
+            lastExplicitCaseNumber = cn;
+            if (!groups.has(cn)) groups.set(cn, []);
+            groups.get(cn).push(row);
+            continue;
+        }
+
+        const anchorKey = caseExcelImplicitAnchorKey(d);
+
+        if (anchorKey) {
+            lastExplicitCaseNumber = null;
+            if (implicitGroupKey && implicitAnchorKey === anchorKey) {
+                groups.get(implicitGroupKey).push(row);
+            } else {
+                implicitAnchorKey = anchorKey;
+                implicitGroupKey = `__implicit_${r}`;
+                groups.set(implicitGroupKey, [row]);
+            }
+            continue;
+        }
+
+        if (
+            lastExplicitCaseNumber &&
+            (caseExcelRowHasClientPayload(d) || caseExcelRowHasContinuationFields(d))
+        ) {
+            groups.get(lastExplicitCaseNumber).push(row);
+            continue;
+        }
+
+        if (implicitGroupKey && (caseExcelRowHasClientPayload(d) || caseExcelRowHasContinuationFields(d))) {
+            groups.get(implicitGroupKey).push(row);
+            continue;
+        }
+
+        implicitGroupKey = null;
+        implicitAnchorKey = null;
+        lastExplicitCaseNumber = null;
+        const orphanKey = `__row_${r}`;
+        groups.set(orphanKey, [row]);
+    }
+
+    return groups;
+}
+
+function isStrictObjectIdString(id) {
+    return mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === String(id);
+}
+
+/** Collect distinct keys from parsed Excel rows for batched DB lookups (preview + import). */
+function collectCaseExcelLookupKeys(parsedRows) {
+    const caseNumbers = new Set();
+    const clientIdStrings = new Set();
+    const phones = new Set();
+    const emails = new Set();
+
+    for (const row of parsedRows) {
+        const d = row.data;
+        const cn = toSafeString(d.caseNumber).trim();
+        if (cn) caseNumbers.add(cn);
+
+        const cid = toSafeString(d.clientId);
+        if (cid) clientIdStrings.add(cid);
+
+        const clientPhoneRaw = toSafeString(d.clientPhone);
+        const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
+        const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+        if (clientPhone) phones.add(clientPhone);
+        if (clientEmail) emails.add(clientEmail);
+    }
+
+    return { caseNumbers, clientIdStrings, phones, emails };
+}
+
+/**
+ * Load existing cases/clients referenced by the sheet in a few queries (avoids N+1 per row).
+ * Import should call `addCreatedClientToCaseExcelLookups` after each Client.create so later rows resolve.
+ */
+async function loadCaseExcelImportLookups(organizationId, parsedRows) {
+    const { caseNumbers, clientIdStrings, phones, emails } = collectCaseExcelLookupKeys(parsedRows);
+
+    const existingCaseNumbers = new Set();
+    const clientById = new Map();
+    const clientsByPhone = new Map();
+    const clientsByEmail = new Map();
+
+    const caseNumArr = [...caseNumbers];
+    const phoneArr = [...phones];
+    const emailArr = [...emails];
+
+    const objectIds = [];
+    for (const s of clientIdStrings) {
+        if (isStrictObjectIdString(s)) objectIds.push(new mongoose.Types.ObjectId(s));
+    }
+
+    const orConds = [];
+    if (phoneArr.length) orConds.push({ phone: { $in: phoneArr } });
+    if (emailArr.length) orConds.push({ email: { $in: emailArr } });
+
+    const [caseDocs, clientByIdDocs, phoneEmailClients] = await Promise.all([
+        caseNumArr.length
+            ? Case.find({
+                organization: organizationId,
+                deletedAt: null,
+                caseNumber: { $in: caseNumArr }
+            })
+                .select('_id caseNumber')
+                .lean()
+            : Promise.resolve([]),
+        objectIds.length
+            ? Client.find({
+                _id: { $in: objectIds },
+                organization: organizationId,
+                deletedAt: null
+            })
+                .select('_id')
+                .lean()
+            : Promise.resolve([]),
+        orConds.length
+            ? Client.find({
+                organization: organizationId,
+                deletedAt: null,
+                $or: orConds
+            })
+                .select('_id phone email')
+                .lean()
+            : Promise.resolve([])
+    ]);
+
+    for (const c of caseDocs) {
+        if (c.caseNumber != null && String(c.caseNumber).trim()) existingCaseNumbers.add(String(c.caseNumber).trim());
+    }
+    for (const cl of clientByIdDocs) {
+        clientById.set(cl._id.toString(), cl);
+    }
+    for (const cl of phoneEmailClients) {
+        if (cl.phone != null && cl.phone !== '') {
+            const key = String(cl.phone).replace(/\D/g, '');
+            if (key) {
+                if (!clientsByPhone.has(key)) clientsByPhone.set(key, []);
+                clientsByPhone.get(key).push(cl);
+            }
+        }
+        if (cl.email != null && String(cl.email).trim()) {
+            const em = String(cl.email).toLowerCase();
+            if (!clientsByEmail.has(em)) clientsByEmail.set(em, []);
+            clientsByEmail.get(em).push(cl);
+        }
+    }
+
+    return { existingCaseNumbers, clientById, clientsByPhone, clientsByEmail };
+}
+
+function addCreatedClientToCaseExcelLookups(lookups, doc) {
+    const id = doc._id.toString();
+    lookups.clientById.set(id, { _id: doc._id });
+    if (doc.phone != null && doc.phone !== '') {
+        const key = String(doc.phone).replace(/\D/g, '');
+        if (key) {
+            if (!lookups.clientsByPhone.has(key)) lookups.clientsByPhone.set(key, []);
+            lookups.clientsByPhone.get(key).push({ _id: doc._id });
+        }
+    }
+    if (doc.email != null && String(doc.email).trim()) {
+        const em = String(doc.email).toLowerCase();
+        if (!lookups.clientsByEmail.has(em)) lookups.clientsByEmail.set(em, []);
+        lookups.clientsByEmail.get(em).push({ _id: doc._id });
+    }
+}
+
+/** Undo addCreatedClientToCaseExcelLookups when a case group is skipped after staging new clients. */
+function removePendingClientFromCaseExcelLookups(lookups, doc) {
+    const idStr = doc._id.toString();
+    lookups.clientById.delete(idStr);
+    if (doc.phone != null && doc.phone !== '') {
+        const key = String(doc.phone).replace(/\D/g, '');
+        if (key && lookups.clientsByPhone.has(key)) {
+            const arr = lookups.clientsByPhone.get(key).filter((c) => c._id.toString() !== idStr);
+            if (arr.length) lookups.clientsByPhone.set(key, arr);
+            else lookups.clientsByPhone.delete(key);
+        }
+    }
+    if (doc.email != null && String(doc.email).trim()) {
+        const em = String(doc.email).toLowerCase();
+        if (lookups.clientsByEmail.has(em)) {
+            const arr = lookups.clientsByEmail.get(em).filter((c) => c._id.toString() !== idStr);
+            if (arr.length) lookups.clientsByEmail.set(em, arr);
+            else lookups.clientsByEmail.delete(em);
+        }
+    }
+}
+
+/** Match clientId or phone/email against preloaded maps (same rules as former per-row queries). */
+function resolveCaseExcelClientFromLookups(d, lookups) {
+    const clientId = toSafeString(d.clientId);
+    const clientPhoneRaw = toSafeString(d.clientPhone);
+    const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
+    const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+    const clientIssues = [];
+
+    if (clientId) {
+        const cl = lookups.clientById.get(clientId);
+        if (!cl) {
+            clientIssues.push(`clientId "${clientId}" not found in your organization`);
+            return { clientPhone, clientPhoneRaw, clientEmail, linkedClientId: null, clientIssues };
+        }
+        return { clientPhone, clientPhoneRaw, clientEmail, linkedClientId: cl._id.toString(), clientIssues };
+    }
+
+    let byPhone = [];
+    let byEmail = [];
+    if (clientPhone) byPhone = lookups.clientsByPhone.get(clientPhone) || [];
+    if (clientEmail) byEmail = lookups.clientsByEmail.get(clientEmail) || [];
+
+    if (byPhone.length > 1) {
+        clientIssues.push(`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`);
+    }
+    if (byEmail.length > 1) {
+        clientIssues.push(`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`);
+    }
+
+    const phoneId = byPhone[0]?._id?.toString();
+    const emailId = byEmail[0]?._id?.toString();
+    if (phoneId && emailId && phoneId !== emailId) {
+        clientIssues.push('clientPhone and clientEmail belong to different clients. Please correct or use clientId.');
+    }
+
+    const linkedClientId = !clientIssues.length ? phoneId || emailId || null : null;
+    return { clientPhone, clientPhoneRaw, clientEmail, linkedClientId, clientIssues };
 }
 
 /**
@@ -146,6 +470,10 @@ exports.createCase = asyncHandler(async (req, res, next) => {
         if (String(effectiveAssignedTo) !== String(userId) && req.userRole && !canAssignModule(req.userRole, 'cases')) {
             return next(new ErrorResponse('You do not have permission to assign cases to other users', 403));
         }
+        const assigneeCheck = await assertAssignableUserInOrg(organizationId, effectiveAssignedTo);
+        if (assigneeCheck && assigneeCheck.error) {
+            return next(new ErrorResponse(assigneeCheck.error, 400));
+        }
     }
 
     const newCase = await Case.create({
@@ -197,6 +525,25 @@ exports.createCase = asyncHandler(async (req, res, next) => {
         }
     }
 
+    // Notify the assigned user when creator assigns to someone else during creation
+    if (effectiveAssignedTo && String(effectiveAssignedTo) !== userId.toString()) {
+        try {
+            const caseLabel = newCase.caseNumber || 'New case';
+            await Notification.create({
+                userId: String(effectiveAssignedTo),
+                organization: organizationId,
+                type: 'case_assigned',
+                title: 'Case assigned to you',
+                message: `${caseLabel} (${newCase.partyName}) has been assigned to you.`,
+                relatedEntityType: 'case',
+                relatedEntityId: newCase._id.toString(),
+                createdBy: userId.toString()
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+        }
+    }
+
     await newCase.populate('assignedTo', 'firstName lastName email');
     await newCase.populate('createdBy', 'firstName lastName email');
     await newCase.populate('clients', 'firstName lastName email phone');
@@ -206,6 +553,257 @@ exports.createCase = asyncHandler(async (req, res, next) => {
         success: true,
         message: 'Case created successfully',
         data: newCase
+    });
+});
+
+/**
+ * @desc    Bulk assign cases to user(s) (or unassign). SUPER_ADMIN or cases-module assignees only.
+ * @route   POST /api/cases/bulk-assign
+ * @access  Private — `cases` read + cases assignee (see rbac.requireCaseBulkAssignAccess)
+ * @body    Mode A — one assignee for many cases:
+ *          { caseIds: string[], assignedTo?: string | null }
+ *          Mode B — many assignees in one request (each group: many cases → one user):
+ *          { groups: Array<{ caseIds: string[], assignedTo?: string | null }> }
+ *          Use `assignedTo: null` or omit to clear assignment for that group. Each case may appear in only one group.
+ */
+exports.bulkAssignCases = asyncHandler(async (req, res, next) => {
+    const organizationId = req.user.organization;
+    const userId = req.user._id;
+    const updatedByStr = userId && userId.toString ? userId.toString() : String(userId);
+
+    const { caseIds, assignedTo, groups } = req.body;
+    const useGroups = Array.isArray(groups) && groups.length > 0;
+
+    if (useGroups) {
+        const seenCases = new Set();
+        const normalizedGroups = [];
+
+        for (let i = 0; i < groups.length; i++) {
+            const g = groups[i] || {};
+            const ids = normalizeCaseIdList(g.caseIds);
+            if (ids.length === 0) {
+                return next(new ErrorResponse(`groups[${i}].caseIds must contain at least one case ID`, 400));
+            }
+            for (const id of ids) {
+                if (seenCases.has(id)) {
+                    return next(
+                        new ErrorResponse(
+                            `Each case can only appear once across groups (duplicate: ${id})`,
+                            400
+                        )
+                    );
+                }
+                seenCases.add(id);
+            }
+            normalizedGroups.push({ caseIds: ids, assignedTo: g.assignedTo });
+        }
+
+        if (seenCases.size > MAX_BULK_ASSIGN_CASES) {
+            return next(new ErrorResponse(`At most ${MAX_BULK_ASSIGN_CASES} distinct cases per request`, 400));
+        }
+
+        const assigneeIdsToCheck = new Set();
+        for (const g of normalizedGroups) {
+            if (g.assignedTo !== undefined && g.assignedTo !== null && String(g.assignedTo).trim() !== '') {
+                assigneeIdsToCheck.add(String(g.assignedTo).trim());
+            }
+        }
+
+        for (const aid of assigneeIdsToCheck) {
+            const check = await assertAssignableUserInOrg(organizationId, aid);
+            if (check && check.error) return next(new ErrorResponse(`${check.error} (userId: ${aid})`, 400));
+        }
+
+        const groupResults = [];
+        let totalRequested = 0;
+        let totalMatched = 0;
+        let totalModified = 0;
+
+        for (let i = 0; i < normalizedGroups.length; i++) {
+            const { caseIds: gIds, assignedTo: gAssign } = normalizedGroups[i];
+            totalRequested += gIds.length;
+
+            let targetAssignedTo = null;
+            if (gAssign !== undefined && gAssign !== null && String(gAssign).trim() !== '') {
+                targetAssignedTo = String(gAssign).trim();
+            }
+
+            const existing = await Case.find({
+                _id: { $in: gIds },
+                organization: organizationId,
+                deletedAt: null
+            })
+                .select('_id')
+                .lean();
+
+            const matchedIds = existing.map((c) => c._id.toString());
+            const matchedSet = new Set(matchedIds);
+            const missingIds = gIds.filter((id) => !matchedSet.has(id));
+
+            let matchedCount = 0;
+            let modifiedCount = 0;
+            if (matchedIds.length > 0) {
+                const updateResult = await Case.updateMany(
+                    {
+                        _id: { $in: matchedIds },
+                        organization: organizationId,
+                        deletedAt: null
+                    },
+                    {
+                        $set: {
+                            assignedTo: targetAssignedTo,
+                            updatedBy: updatedByStr
+                        }
+                    }
+                );
+                matchedCount = updateResult.matchedCount ?? updateResult.nMatched ?? matchedIds.length;
+                modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
+            }
+
+            totalMatched += matchedCount;
+            totalModified += modifiedCount;
+
+            if (targetAssignedTo && modifiedCount > 0) {
+                try {
+                    await Notification.create({
+                        userId: targetAssignedTo,
+                        organization: organizationId,
+                        type: 'case_assigned',
+                        title: 'Cases assigned to you',
+                        message: `${modifiedCount} case(s) have been assigned to you.`,
+                        relatedEntityType: 'case',
+                        relatedEntityId: null,
+                        createdBy: updatedByStr
+                    });
+                } catch (notifErr) {
+                    console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+                }
+            }
+
+            groupResults.push({
+                groupIndex: i,
+                assignedTo: targetAssignedTo,
+                requested: gIds.length,
+                matched: matchedCount,
+                modified: modifiedCount,
+                missingIds:
+                    missingIds.length <= 50
+                        ? missingIds
+                        : missingIds.slice(0, 50).concat([`(+${missingIds.length - 50} more not listed)`])
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: 'Bulk assign completed (grouped)',
+            data: {
+                mode: 'groups',
+                groupCount: normalizedGroups.length,
+                requested: totalRequested,
+                matched: totalMatched,
+                modified: totalModified,
+                groups: groupResults
+            }
+        });
+    }
+
+    if (!Array.isArray(caseIds) || caseIds.length === 0) {
+        return next(
+            new ErrorResponse(
+                'Send either { caseIds, assignedTo } for one assignee, or { groups: [{ caseIds, assignedTo }, ...] } for multiple assignees',
+                400
+            )
+        );
+    }
+    if (caseIds.length > MAX_BULK_ASSIGN_CASES) {
+        return next(new ErrorResponse(`At most ${MAX_BULK_ASSIGN_CASES} cases per request`, 400));
+    }
+
+    const uniqueIds = normalizeCaseIdList(caseIds);
+    if (uniqueIds.length === 0) {
+        return next(new ErrorResponse('caseIds must contain at least one valid case ID', 400));
+    }
+
+    const assigneeCheck = await assertAssignableUserInOrg(organizationId, assignedTo);
+    if (assigneeCheck && assigneeCheck.error) {
+        return next(new ErrorResponse(assigneeCheck.error, 400));
+    }
+    const targetAssignedTo = assigneeCheck ? assigneeCheck.assignedTo : null;
+
+    const existing = await Case.find({
+        _id: { $in: uniqueIds },
+        organization: organizationId,
+        deletedAt: null
+    })
+        .select('_id')
+        .lean();
+
+    const matchedIds = existing.map((c) => c._id.toString());
+    const matchedSet = new Set(matchedIds);
+
+    if (matchedIds.length === 0) {
+        return res.status(200).json({
+            success: true,
+            message: 'No matching cases updated',
+            data: {
+                mode: 'single',
+                requested: uniqueIds.length,
+                matched: 0,
+                modified: 0,
+                missingIds: uniqueIds.slice(0, 100)
+            }
+        });
+    }
+
+    const updateResult = await Case.updateMany(
+        {
+            _id: { $in: matchedIds },
+            organization: organizationId,
+            deletedAt: null
+        },
+        {
+            $set: {
+                assignedTo: targetAssignedTo,
+                updatedBy: updatedByStr
+            }
+        }
+    );
+
+    const matchedCount = updateResult.matchedCount ?? updateResult.nMatched ?? matchedIds.length;
+    const modifiedCount = updateResult.modifiedCount ?? updateResult.nModified ?? 0;
+    const missingIds = uniqueIds.filter((id) => !matchedSet.has(id));
+
+    if (targetAssignedTo && modifiedCount > 0) {
+        try {
+            await Notification.create({
+                userId: targetAssignedTo,
+                organization: organizationId,
+                type: 'case_assigned',
+                title: 'Cases assigned to you',
+                message: `${modifiedCount} case(s) have been assigned to you.`,
+                relatedEntityType: 'case',
+                relatedEntityId: null,
+                createdBy: updatedByStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+        }
+    }
+
+    return res.status(200).json({
+        success: true,
+        message: 'Bulk assign completed',
+        data: {
+            mode: 'single',
+            requested: uniqueIds.length,
+            matched: matchedCount,
+            modified: modifiedCount,
+            assignedTo: targetAssignedTo,
+            missingIds:
+                missingIds.length <= 100
+                    ? missingIds
+                    : missingIds.slice(0, 100).concat([`(+${missingIds.length - 100} more not listed)`])
+        }
     });
 });
 
@@ -222,6 +820,7 @@ exports.getCases = asyncHandler(async (req, res, next) => {
         limit = 10,
         status,
         assignedTo,
+        assignmentFilter,
         search,
         caseType,
         caseNumber,
@@ -245,6 +844,12 @@ exports.getCases = asyncHandler(async (req, res, next) => {
 
     if (assignedTo) {
         query.assignedTo = assignedTo;
+    }
+
+    if (assignmentFilter === 'assigned') {
+        query.assignedTo = { $ne: null };
+    } else if (assignmentFilter === 'unassigned') {
+        query.assignedTo = null;
     }
 
     if (caseType && String(caseType).trim()) {
@@ -375,6 +980,16 @@ exports.updateCase = asyncHandler(async (req, res, next) => {
         }
     }
 
+    if (req.body.assignedTo !== undefined) {
+        const rawAssigned = req.body.assignedTo;
+        if (rawAssigned !== null && String(rawAssigned).trim() !== '') {
+            const assigneeCheck = await assertAssignableUserInOrg(organizationId, rawAssigned);
+            if (assigneeCheck && assigneeCheck.error) {
+                return next(new ErrorResponse(assigneeCheck.error, 400));
+            }
+        }
+    }
+
     // clientCount and clients - only assignees can update
     if (req.body.clientCount !== undefined || req.body.clients !== undefined) {
         if (!req.userRole || !canAssignModule(req.userRole, 'cases')) {
@@ -403,6 +1018,8 @@ exports.updateCase = asyncHandler(async (req, res, next) => {
         caseDoc.clients = newClients;
     }
 
+    const previousAssignedTo = caseDoc.assignedTo ? String(caseDoc.assignedTo) : null;
+
     const updateFields = [
         'caseNumber', 'caseType', 'partyName', 'courtName', 'courtPremises',
         'assignedTo', 'status', 'notes'
@@ -417,6 +1034,27 @@ exports.updateCase = asyncHandler(async (req, res, next) => {
 
     caseDoc.updatedBy = userId;
     await caseDoc.save();
+
+    // Notify new assignee when assignment changes to a different user
+    const newAssignedTo = caseDoc.assignedTo ? String(caseDoc.assignedTo) : null;
+    const updaterIdStr = userId.toString();
+    if (req.body.assignedTo !== undefined && newAssignedTo && newAssignedTo !== previousAssignedTo && newAssignedTo !== updaterIdStr) {
+        try {
+            const caseLabel = caseDoc.caseNumber || String(caseDoc._id);
+            await Notification.create({
+                userId: newAssignedTo,
+                organization: organizationId,
+                type: 'case_assigned',
+                title: 'Case assigned to you',
+                message: `${caseLabel} (${caseDoc.partyName}) has been assigned to you.`,
+                relatedEntityType: 'case',
+                relatedEntityId: caseDoc._id.toString(),
+                createdBy: updaterIdStr
+            });
+        } catch (notifErr) {
+            console.error('⚠️ Failed to create case_assigned notification:', notifErr.message);
+        }
+    }
 
     await caseDoc.populate('assignedTo', 'firstName lastName email');
     await caseDoc.populate('createdBy', 'firstName lastName email');
@@ -582,7 +1220,7 @@ exports.unarchiveCase = asyncHandler(async (req, res, next) => {
 exports.downloadCaseExcelTemplate = asyncHandler(async (req, res) => {
     const buffer = writeExcelToBuffer({
         sheetName: CASE_EXCEL_SHEET,
-        headers: CASE_EXCEL_HEADERS_V2,
+        headers: CASE_EXCEL_HEADERS_V1,
         rows: []
     });
 
@@ -603,6 +1241,7 @@ exports.exportCasesToExcel = asyncHandler(async (req, res) => {
     const {
         status,
         assignedTo,
+        assignmentFilter,
         search,
         caseType,
         caseNumber,
@@ -617,6 +1256,8 @@ exports.exportCasesToExcel = asyncHandler(async (req, res) => {
 
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo;
+    if (assignmentFilter === 'assigned') query.assignedTo = { $ne: null };
+    else if (assignmentFilter === 'unassigned') query.assignedTo = null;
     if (caseType && String(caseType).trim()) query.caseType = { $regex: String(caseType).trim(), $options: 'i' };
     if (caseNumber && String(caseNumber).trim()) query.caseNumber = { $regex: String(caseNumber).trim(), $options: 'i' };
     if (search) {
@@ -724,38 +1365,34 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
     const canAssign = req.userRole && canAssignModule(req.userRole, 'cases');
     const importerIsAssignee = !!canAssign;
 
-    // Group rows by caseNumber (trimmed) if present. If missing, each row becomes its own case.
-    const groups = new Map();
+    const groups = buildCaseExcelImportGroups(parsed.rows);
     const errors = [];
 
-    for (const row of parsed.rows) {
-        const r = row.rowNumber;
-        const d = row.data;
+    const lookups = await loadCaseExcelImportLookups(organizationId, parsed.rows);
 
-        const caseNumber = toSafeString(d.caseNumber);
-        const key = caseNumber ? caseNumber.trim() : `__row_${r}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push({ rowNumber: r, data: d });
-    }
-
-    let createdCases = 0;
-    let createdClients = 0;
+    const pendingNewClients = [];
+    const pendingNewCases = [];
     let linkedExistingClients = 0;
     let skippedCases = 0;
+    const createdByStr = userId && userId.toString ? userId.toString() : String(userId);
 
     for (const [caseKey, rows] of groups.entries()) {
         const first = rows[0];
-        const d0 = first.data;
+        const groupPendingClients = [];
         const rowIssues = [];
 
-        const caseNumber = toSafeString(d0.caseNumber).trim();
-        const caseType = toSafeString(d0.caseType).trim();
-        const partyName = toSafeString(d0.partyName).trim();
-        const stage = toSafeString(d0.stage) || undefined;
-        const courtName = toSafeString(d0.courtName) || undefined;
-        const courtPremises = toSafeString(d0.courtPremises) || undefined;
-        const notes = toSafeString(d0.notes) || undefined;
-        const clientCount = toOptionalNumber(d0.clientCount);
+        const caseNumber = firstNonEmptyCaseExcelField(rows, 'caseNumber');
+        const caseType = firstNonEmptyCaseExcelField(rows, 'caseType');
+        const partyName = firstNonEmptyCaseExcelField(rows, 'partyName');
+        const stageRaw = firstNonEmptyCaseExcelField(rows, 'stage');
+        const stage = stageRaw || undefined;
+        const courtNameRaw = firstNonEmptyCaseExcelField(rows, 'courtName');
+        const courtName = courtNameRaw || undefined;
+        const courtPremisesRaw = firstNonEmptyCaseExcelField(rows, 'courtPremises');
+        const courtPremises = courtPremisesRaw || undefined;
+        const notesRaw = firstNonEmptyCaseExcelField(rows, 'notes');
+        const notes = notesRaw || undefined;
+        const clientCount = firstDefinedClientCountInCaseGroup(rows);
 
         if (!caseType) rowIssues.push('caseType is required');
         if (!partyName) rowIssues.push('partyName is required');
@@ -774,15 +1411,14 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             rowIssues.push('Only users with case assignee permission can link/create clients during import');
         }
 
-        if (caseNumber) {
-            const existing = await Case.findOne({ organization: organizationId, caseNumber, deletedAt: null }).lean();
-            if (existing) {
-                rowIssues.push('A case with this caseNumber already exists');
-            }
+        if (caseNumber && lookups.existingCaseNumbers.has(caseNumber)) {
+            rowIssues.push('A case with this caseNumber already exists');
         }
 
+        const caseErrCtx = { ...(caseNumber ? { caseNumber } : {}) };
+
         if (rowIssues.length > 0) {
-            errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: rowIssues });
+            errors.push({ row: first.rowNumber, ...caseErrCtx, errors: rowIssues });
             skippedCases++;
             continue;
         }
@@ -795,47 +1431,24 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
             const d = rr.data;
 
             const clientId = toSafeString(d.clientId);
-            const clientPhoneRaw = toSafeString(d.clientPhone);
-            const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
-            const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+            const match = resolveCaseExcelClientFromLookups(d, lookups);
+            const { clientPhone, clientPhoneRaw, clientEmail, linkedClientId: fromLookup, clientIssues: matchIssues } = match;
 
             let resolvedClientId = null;
 
             if (clientId) {
-                const cl = await Client.findOne({ _id: clientId, organization: organizationId, deletedAt: null }).select('_id').lean();
-                if (!cl) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientId "${clientId}" not found in your organization`] });
+                if (matchIssues.length) {
+                    errors.push({ row: r, ...caseErrCtx, errors: matchIssues });
                     continue;
                 }
-                resolvedClientId = cl._id.toString();
+                resolvedClientId = fromLookup;
                 linkedExistingClients++;
             } else if (clientPhone || clientEmail) {
-                // If both phone and email provided, they must resolve to the same client.
-                // If either one matches multiple clients, treat as ambiguity.
-                const byPhone = clientPhone
-                    ? await Client.find({ organization: organizationId, deletedAt: null, phone: clientPhone }).select('_id').lean()
-                    : [];
-                const byEmail = clientEmail
-                    ? await Client.find({ organization: organizationId, deletedAt: null, email: clientEmail }).select('_id').lean()
-                    : [];
-
-                if (byPhone.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                if (matchIssues.length) {
+                    errors.push({ row: r, ...caseErrCtx, errors: matchIssues });
                     continue;
                 }
-                if (byEmail.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
-                    continue;
-                }
-
-                const phoneId = byPhone[0]?._id?.toString();
-                const emailId = byEmail[0]?._id?.toString();
-                if (phoneId && emailId && phoneId !== emailId) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
-                    continue;
-                }
-
-                resolvedClientId = phoneId || emailId || null;
+                resolvedClientId = fromLookup;
                 if (resolvedClientId) linkedExistingClients++;
             }
 
@@ -862,39 +1475,28 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                 if (fees === undefined || Number.isNaN(fees)) clientIssues.push('clientFees is required to create client and must be a number');
 
                 if (clientIssues.length > 0) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: clientIssues });
+                    errors.push({ row: r, ...caseErrCtx, errors: clientIssues });
                     continue;
                 }
 
                 // If phone/email already exists, link instead of creating (but reject ambiguity)
-                const byPhone = clientPhone
-                    ? await Client.find({ organization: organizationId, deletedAt: null, phone: clientPhone }).select('_id').lean()
-                    : [];
-                const byEmail = clientEmail
-                    ? await Client.find({ organization: organizationId, deletedAt: null, email: clientEmail }).select('_id').lean()
-                    : [];
-                if (byPhone.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientPhone "${clientPhoneRaw}" matches multiple clients. Please fix duplicates or use clientId.`] });
+                const recheck = resolveCaseExcelClientFromLookups(
+                    { clientPhone: d.clientPhone, clientEmail: d.clientEmail },
+                    lookups
+                );
+                if (recheck.clientIssues.length) {
+                    errors.push({ row: r, ...caseErrCtx, errors: recheck.clientIssues });
                     continue;
                 }
-                if (byEmail.length > 1) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: [`clientEmail "${clientEmail}" matches multiple clients. Please fix duplicates or use clientId.`] });
-                    continue;
-                }
-                const phoneId = byPhone[0]?._id?.toString();
-                const emailId = byEmail[0]?._id?.toString();
-                if (phoneId && emailId && phoneId !== emailId) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: ['clientPhone and clientEmail belong to different clients. Please correct or use clientId.'] });
-                    continue;
-                }
-                if (phoneId || emailId) {
-                    resolvedClientId = phoneId || emailId;
+                if (recheck.linkedClientId) {
+                    resolvedClientId = recheck.linkedClientId;
                     linkedExistingClients++;
                 }
 
                 if (!resolvedClientId) {
-                try {
-                    const created = await Client.create({
+                    const newClientId = generateClientId();
+                    const clientDoc = {
+                        _id: newClientId,
                         firstName: cf,
                         lastName: cln,
                         email: clientEmail || undefined,
@@ -906,16 +1508,16 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
                         country,
                         fees,
                         organization: organizationId,
-                        createdBy: userId,
-                        // Case import template does not include assignedTo; default is unassigned.
+                        createdBy: createdByStr,
                         assignedTo: null
+                    };
+                    groupPendingClients.push(clientDoc);
+                    addCreatedClientToCaseExcelLookups(lookups, {
+                        _id: newClientId,
+                        phone: clientPhone,
+                        email: clientEmail || undefined
                     });
-                    resolvedClientId = created._id.toString();
-                    createdClients++;
-                } catch (e) {
-                    errors.push({ row: r, ...(caseNumber ? { caseNumber } : {}), errors: formatMongooseErrorForUser(e) });
-                    continue;
-                }
+                    resolvedClientId = newClientId;
                 }
             }
 
@@ -927,40 +1529,52 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
 
         const effectiveClientCount = clientCount === undefined ? clientIds.length : (Number.isNaN(clientCount) ? NaN : clientCount);
         if (Number.isNaN(effectiveClientCount)) {
-            errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: ['clientCount must be a number'] });
+            for (const doc of groupPendingClients) removePendingClientFromCaseExcelLookups(lookups, doc);
+            errors.push({ row: first.rowNumber, ...caseErrCtx, errors: ['clientCount must be a number'] });
             skippedCases++;
             continue;
         }
         if (clientIds.length > effectiveClientCount) {
+            for (const doc of groupPendingClients) removePendingClientFromCaseExcelLookups(lookups, doc);
             errors.push({
                 row: first.rowNumber,
-                ...(caseNumber ? { caseNumber } : {}),
+                ...caseErrCtx,
                 errors: [`Cannot assign more than ${effectiveClientCount} client(s). Found ${clientIds.length} client rows for this caseNumber.`]
             });
             skippedCases++;
             continue;
         }
 
-        try {
-            await Case.create({
-                ...(caseNumber ? { caseNumber } : {}),
-                caseType,
-                partyName,
-                stage,
-                courtName,
-                courtPremises,
-                assignedTo: null,
-                clientCount: effectiveClientCount,
-                clients: clientIds,
-                notes,
-                organization: organizationId,
-                createdBy: userId
-            });
-            createdCases++;
-        } catch (e) {
-            errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: formatMongooseErrorForUser(e) });
-            skippedCases++;
+        pendingNewClients.push(...groupPendingClients);
+        pendingNewCases.push({
+            ...(caseNumber ? { caseNumber } : {}),
+            caseType,
+            partyName,
+            stage,
+            courtName,
+            courtPremises,
+            assignedTo: null,
+            clientCount: effectiveClientCount,
+            clients: clientIds,
+            notes,
+            organization: organizationId,
+            createdBy: createdByStr
+        });
+    }
+
+    let createdCases = 0;
+    let createdClients = 0;
+    try {
+        if (pendingNewClients.length) {
+            await Client.insertMany(pendingNewClients, { ordered: true });
+            createdClients = pendingNewClients.length;
         }
+        if (pendingNewCases.length) {
+            await Case.insertMany(pendingNewCases, { ordered: true });
+            createdCases = pendingNewCases.length;
+        }
+    } catch (e) {
+        return next(new ErrorResponse(formatMongooseErrorForUser(e).join('; ') || 'Bulk case/client import failed', 500));
     }
 
     // Notify assignees when a non-assignee bulk-imports unassigned cases
@@ -1011,7 +1625,7 @@ exports.getCaseAssignees = asyncHandler(async (req, res, next) => {
     const users = await User.find({
         _id: { $in: assigneeUserIds },
         organization: organizationId,
-        status: { $nin: ['terminated'] }
+        status: 'approved'
     })
         .select('_id firstName lastName email')
         .sort({ firstName: 1, lastName: 1 })
@@ -1099,7 +1713,7 @@ exports.addCaseStage = asyncHandler(async (req, res, next) => {
     const confirmUsersCount = await User.countDocuments({
         _id: { $in: confirmIds },
         organization: organizationId,
-        status: { $nin: ['terminated'] }
+        status: 'approved'
     });
     if (confirmUsersCount !== confirmIds.length) {
         return next(new ErrorResponse('One or more confirmedBy users are invalid for this organization', 400));
@@ -1107,6 +1721,9 @@ exports.addCaseStage = asyncHandler(async (req, res, next) => {
 
     const beforeLen = caseDoc.stages.length;
     caseDoc.stages.push(...stagesToInsert);
+
+    // Capture plain string IDs before populate replaces them with User documents
+    const confirmedByIds = stagesToInsert.map((s) => String(s.confirmedBy));
 
     caseDoc.updatedBy = userId;
     await caseDoc.save();
@@ -1116,13 +1733,13 @@ exports.addCaseStage = asyncHandler(async (req, res, next) => {
 
     // Notify confirmedBy users to confirm stage(s)
     try {
-        for (const stage of createdStages) {
+        for (let i = 0; i < createdStages.length; i++) {
             await Notification.create({
-                userId: stage.confirmedBy.toString(),
+                userId: confirmedByIds[i],
                 organization: organizationId,
                 type: 'case_stage_needs_confirmation',
                 title: 'Stage needs confirmation',
-                message: `${caseDoc.caseNumber || caseDoc._id} - Please confirm stage: ${stage.stageName}`,
+                message: `${caseDoc.caseNumber || caseDoc._id} - Please confirm stage: ${createdStages[i].stageName}`,
                 relatedEntityType: 'case',
                 relatedEntityId: caseDoc._id.toString(),
                 createdBy: userId
@@ -1159,33 +1776,27 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
 
     const canAssign = req.userRole && canAssignModule(req.userRole, 'cases');
 
-    // Group rows by caseNumber (trimmed) if present. If missing, each row becomes its own case.
-    const groups = new Map();
+    const groups = buildCaseExcelImportGroups(parsed.rows);
     const errors = [];
 
-    for (const row of parsed.rows) {
-        const r = row.rowNumber;
-        const d = row.data;
-
-        const caseNumber = toSafeString(d.caseNumber);
-        const key = caseNumber ? caseNumber.trim() : `__row_${r}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push({ rowNumber: r, data: d });
-    }
+    const lookups = await loadCaseExcelImportLookups(organizationId, parsed.rows);
 
     const preview = [];
 
     for (const [caseKey, rows] of groups.entries()) {
         const first = rows[0];
-        const d0 = first.data;
-        const caseNumber = toSafeString(d0.caseNumber).trim();
-        const caseType = toSafeString(d0.caseType).trim();
-        const partyName = toSafeString(d0.partyName).trim();
-        const stage = toSafeString(d0.stage) || undefined;
-        const courtName = toSafeString(d0.courtName) || undefined;
-        const courtPremises = toSafeString(d0.courtPremises) || undefined;
-        const notes = toSafeString(d0.notes) || undefined;
-        const clientCount = toOptionalNumber(d0.clientCount);
+        const caseNumber = firstNonEmptyCaseExcelField(rows, 'caseNumber');
+        const caseType = firstNonEmptyCaseExcelField(rows, 'caseType');
+        const partyName = firstNonEmptyCaseExcelField(rows, 'partyName');
+        const stageRaw = firstNonEmptyCaseExcelField(rows, 'stage');
+        const stage = stageRaw || undefined;
+        const courtNameRaw = firstNonEmptyCaseExcelField(rows, 'courtName');
+        const courtName = courtNameRaw || undefined;
+        const courtPremisesRaw = firstNonEmptyCaseExcelField(rows, 'courtPremises');
+        const courtPremises = courtPremisesRaw || undefined;
+        const notesRaw = firstNonEmptyCaseExcelField(rows, 'notes');
+        const notes = notesRaw || undefined;
+        const clientCount = firstDefinedClientCountInCaseGroup(rows);
 
         const caseIssues = [];
         if (!caseType) caseIssues.push('caseType is required');
@@ -1205,12 +1816,11 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
             caseIssues.push('Only users with case assignee permission can link/create clients during import');
         }
 
-        if (caseNumber) {
-            const existingCase = await Case.findOne({ organization: organizationId, caseNumber, deletedAt: null }).select('_id').lean();
-            if (existingCase) {
-                caseIssues.push('A case with this caseNumber already exists');
-            }
+        if (caseNumber && lookups.existingCaseNumbers.has(caseNumber)) {
+            caseIssues.push('A case with this caseNumber already exists');
         }
+
+        const casePreviewErrCtx = { ...(caseNumber ? { caseNumber } : {}) };
 
         const clientPreviews = [];
         const resolvedClientIds = new Set();
@@ -1219,46 +1829,18 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
             const r = rr.rowNumber;
             const d = rr.data;
 
-            const clientId = toSafeString(d.clientId);
-            const clientPhoneRaw = toSafeString(d.clientPhone);
-            const clientPhone = clientPhoneRaw ? clientPhoneRaw.replace(/\D/g, '') : '';
-            const clientEmail = toSafeString(d.clientEmail).toLowerCase();
+            const {
+                clientPhone,
+                clientPhoneRaw,
+                clientEmail,
+                linkedClientId: resolvedFromLookup,
+                clientIssues: matchIssues
+            } = resolveCaseExcelClientFromLookups(d, lookups);
 
-            const clientIssues = [];
-            let action = 'none'; // none | link_existing | create_new | invalid
-            let linkedClientId = null;
-
-            if (clientId) {
-                const cl = await Client.findOne({ _id: clientId, organization: organizationId, deletedAt: null }).select('_id').lean();
-                if (!cl) {
-                    clientIssues.push(`clientId "${clientId}" not found in your organization`);
-                } else {
-                    action = 'link_existing';
-                    linkedClientId = cl._id.toString();
-                }
-            } else if (clientPhone || clientEmail) {
-                const byPhone = clientPhone
-                    ? await Client.find({ organization: organizationId, deletedAt: null, phone: clientPhone }).select('_id').lean()
-                    : [];
-                const byEmail = clientEmail
-                    ? await Client.find({ organization: organizationId, deletedAt: null, email: clientEmail }).select('_id').lean()
-                    : [];
-
-                if (byPhone.length > 1) clientIssues.push(`clientPhone "${clientPhoneRaw}" matches multiple clients`);
-                if (byEmail.length > 1) clientIssues.push(`clientEmail "${clientEmail}" matches multiple clients`);
-
-                const phoneId = byPhone[0]?._id?.toString();
-                const emailId = byEmail[0]?._id?.toString();
-                if (phoneId && emailId && phoneId !== emailId) {
-                    clientIssues.push('clientPhone and clientEmail belong to different clients');
-                }
-
-                const resolved = phoneId || emailId || null;
-                if (!clientIssues.length && resolved) {
-                    action = 'link_existing';
-                    linkedClientId = resolved;
-                }
-            }
+            const clientIssues = [...matchIssues];
+            let action = 'none'; // none | link_existing | create_new
+            let linkedClientId = resolvedFromLookup;
+            if (linkedClientId) action = 'link_existing';
 
             if (!linkedClientId && (clientPhone || clientEmail || toSafeString(d.clientFirstName) || toSafeString(d.clientLastName))) {
                 const cf = toSafeString(d.clientFirstName);
@@ -1328,9 +1910,9 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
         }
 
         const willCreateCase = caseIssues.length === 0 && clientPreviews.every((cp) => (cp.issues || []).length === 0);
-        if (caseIssues.length > 0) errors.push({ row: first.rowNumber, ...(caseNumber ? { caseNumber } : {}), errors: caseIssues });
+        if (caseIssues.length > 0) errors.push({ row: first.rowNumber, ...casePreviewErrCtx, errors: caseIssues });
         for (const cp of clientPreviews) {
-            if (cp.issues && cp.issues.length > 0) errors.push({ row: cp.row, ...(caseNumber ? { caseNumber } : {}), errors: cp.issues });
+            if (cp.issues && cp.issues.length > 0) errors.push({ row: cp.row, ...casePreviewErrCtx, errors: cp.issues });
         }
 
         preview.push({

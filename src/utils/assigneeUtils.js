@@ -157,7 +157,7 @@ exports.getAssigneeUserIdsForModule = async (organizationId, moduleName) => {
     const users = await User.find({
         organization: organizationId,
         role: { $in: roleIds },
-        status: { $nin: ['terminated'] }
+        status: 'approved'
     })
         .select('_id')
         .lean();
@@ -179,4 +179,29 @@ exports.checkAssigneeLimit = async (organizationId, isAlreadyAssignee = false) =
     const effectiveNew = isAlreadyAssignee ? 0 : 1;
     const allowed = current + effectiveNew <= limit;
     return { allowed, current, limit };
+};
+
+/**
+ * Case/client assignedTo must be an approved member (pending = invited, not onboarded yet).
+ * @returns {Promise<null | { assignedTo: string } | { error: string }>}
+ */
+exports.assertAssignableUserInOrg = async (organizationId, assignedTo) => {
+    if (assignedTo === undefined || assignedTo === null || String(assignedTo).trim() === '') {
+        return null;
+    }
+    const targetId = String(assignedTo).trim();
+    const assigneeUser = await User.findOne({
+        _id: targetId,
+        organization: organizationId,
+        status: 'approved'
+    })
+        .select('_id')
+        .lean();
+    if (!assigneeUser) {
+        return {
+            error:
+                'Assignee not found or not eligible. Only approved organization members can receive client/case assignments (pending onboarding or inactive accounts cannot be assigned)'
+        };
+    }
+    return { assignedTo: targetId };
 };
