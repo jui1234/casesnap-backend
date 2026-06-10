@@ -1,0 +1,125 @@
+// utils/subscriptionFeatureUtils.js
+// Subscription plan feature mapping and feature gating helpers
+
+const { isSubscriptionExpired } = require('./subscriptionUtils');
+
+const LEGACY_PLAN_ALIASES = {
+    free: 'free',
+    base: 'basic_monthly',
+    popular: 'professional_monthly'
+};
+
+const PLAN_CONFIG = {
+    free: {
+        label: 'Free',
+        features: [],
+        limits: {
+            maxUsers: 3,
+            maxClients: 50,
+            maxCases: 100
+        }
+    },
+    basic_monthly: {
+        label: 'Basic Monthly',
+        features: ['case_assignment', 'excel_import_export'],
+        limits: {
+            maxUsers: 15,
+            maxClients: 250,
+            maxCases: 500
+        }
+    },
+    basic_yearly: {
+        label: 'Basic Yearly',
+        features: ['case_assignment', 'excel_import_export'],
+        limits: {
+            maxUsers: 15,
+            maxClients: 250,
+            maxCases: 500
+        }
+    },
+    professional_monthly: {
+        label: 'Professional Monthly',
+        features: ['case_assignment', 'excel_import_export', 'case_approval', 'audit_logs', 'analytics'],
+        limits: {
+            maxUsers: 50,
+            maxClients: 2000,
+            maxCases: 4000
+        }
+    },
+    professional_yearly: {
+        label: 'Professional Yearly',
+        features: ['case_assignment', 'excel_import_export', 'case_approval', 'audit_logs', 'analytics'],
+        limits: {
+            maxUsers: 50,
+            maxClients: 2000,
+            maxCases: 4000
+        }
+    }
+};
+
+const normalizePlanName = (planName) => {
+    if (!planName) return 'free';
+    const normalized = String(planName)
+        .toLowerCase()
+        .trim()
+        .replace(/[-\s]+/g, '_');
+    return LEGACY_PLAN_ALIASES[normalized] || normalized;
+};
+
+const getPlanConfig = (planName) => {
+    const normalized = normalizePlanName(planName);
+    return PLAN_CONFIG[normalized] || PLAN_CONFIG.free;
+};
+
+const getSubscriptionFeatures = (planName) => {
+    return getPlanConfig(planName).features || [];
+};
+
+const getSubscriptionFeatureFlags = (planName) => {
+    const features = getSubscriptionFeatures(planName);
+    return features.reduce((flags, feature) => {
+        flags[feature] = true;
+        return flags;
+    }, {});
+};
+
+const getPlanLimits = (planName) => {
+    return getPlanConfig(planName).limits || {};
+};
+
+const getSubscriptionSummary = (organization = {}) => {
+    const planName = normalizePlanName(organization.subscriptionPlan);
+    const config = getPlanConfig(planName);
+    const status = String(organization.subscriptionStatus || 'active').toLowerCase().trim();
+    const expiresAt = organization.subscriptionExpiresAt || null;
+    const expired = isSubscriptionExpired(expiresAt);
+
+    return {
+        subscriptionPlan: planName,
+        subscriptionLabel: config.label,
+        subscriptionStatus: status,
+        subscriptionExpiresAt: expiresAt,
+        subscriptionFeatures: config.features,
+        subscriptionFeatureFlags: getSubscriptionFeatureFlags(planName),
+        subscriptionLimits: config.limits,
+        isSubscriptionActive: status === 'active' && !expired,
+        isSubscriptionExpired: expired
+    };
+};
+
+const isFeatureEnabled = (organization = {}, featureKey) => {
+    if (!featureKey) return false;
+    const planName = normalizePlanName(organization.subscriptionPlan);
+    const flags = getSubscriptionFeatureFlags(planName);
+    return Boolean(flags[featureKey]);
+};
+
+module.exports = {
+    normalizePlanName,
+    getPlanConfig,
+    getSubscriptionFeatures,
+    getSubscriptionFeatureFlags,
+    getPlanLimits,
+    getSubscriptionSummary,
+    isFeatureEnabled
+};

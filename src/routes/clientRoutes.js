@@ -21,6 +21,7 @@ const {
 
 const { protect } = require('../middleware/auth');
 const { loadUserRole, checkPermission, requireClientBulkAssignAccess } = require('../middleware/rbac');
+const { checkSubscriptionFeature } = require('../middleware/subscriptionFeature');
 
 // All routes require authentication and role loading
 router.use(protect);
@@ -53,20 +54,20 @@ router.post('/', checkPermission('client', 'create'), createClient);
 router.get('/', checkPermission('client', 'read'), getClients);
 
 // Excel import/export
-router.get('/excel/template', checkPermission('client', 'read'), downloadClientExcelTemplate);
-router.get('/excel/export', checkPermission('client', 'read'), exportClientsToExcel);
-router.post('/excel/preview', checkPermission('client', 'create'), excelUpload.fields([
+router.get('/excel/template', checkPermission('client', 'read'), checkSubscriptionFeature('excel_import_export'), downloadClientExcelTemplate);
+router.get('/excel/export', checkPermission('client', 'read'), checkSubscriptionFeature('excel_import_export'), exportClientsToExcel);
+router.post('/excel/preview', checkPermission('client', 'create'), checkSubscriptionFeature('excel_import_export'), excelUpload.fields([
     { name: 'file', maxCount: 1 },
     { name: 'excel', maxCount: 1 },
     { name: 'upload', maxCount: 1 }
 ]), normalizeExcelFile, previewClientsExcelImport);
-router.post('/excel/import', checkPermission('client', 'create'), excelUpload.fields([
+router.post('/excel/import', checkPermission('client', 'create'), checkSubscriptionFeature('excel_import_export'), excelUpload.fields([
     { name: 'file', maxCount: 1 },
     { name: 'excel', maxCount: 1 },
     { name: 'upload', maxCount: 1 }
 ]), normalizeExcelFile, importClientsFromExcel);
 
-router.post('/bulk-assign', checkPermission('client', 'read'), requireClientBulkAssignAccess, bulkAssignClients);
+router.post('/bulk-assign', checkPermission('client', 'read'), checkSubscriptionFeature('case_assignment'), requireClientBulkAssignAccess, bulkAssignClients);
 
 router.get('/:id', checkPermission('client', 'read'), getClient);
 router.put('/:id', checkPermission('client', 'update'), updateClient);

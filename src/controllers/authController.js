@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
 const { getEffectivePermissionsForRole } = require('../utils/roleUtils');
 const { validateOrganizationSubscription } = require('../utils/subscriptionUtils');
+const { getSubscriptionSummary } = require('../utils/subscriptionFeatureUtils');
 const { sendPasswordResetEmail } = require('../utils/gmailService');
 
 // @desc      Login user (Admin or Employee)
@@ -132,6 +133,7 @@ exports.login = asyncHandler(async (req, res, next) => {
             }
 
             // Only build full login-like response when user can manage subscription
+            const subscriptionSummary = getSubscriptionSummary(user.organization);
             let userData;
             if (userType === 'employee') {
                 userData = {
@@ -159,9 +161,13 @@ exports.login = asyncHandler(async (req, res, next) => {
                     adminId: user.adminId,
                     status: user.status,
                     role: 'employee',
-                    subscriptionPlan: user.organization?.subscriptionPlan || null,
-                    subscriptionStatus: user.organization?.subscriptionStatus || 'active',
-                    subscriptionExpiresAt: user.organization?.subscriptionExpiresAt || null,
+                    subscriptionPlan: subscriptionSummary.subscriptionPlan,
+                    subscriptionLabel: subscriptionSummary.subscriptionLabel,
+                    subscriptionStatus: subscriptionSummary.subscriptionStatus,
+                    subscriptionExpiresAt: subscriptionSummary.subscriptionExpiresAt,
+                    subscriptionFeatures: subscriptionSummary.subscriptionFeatures,
+                    subscriptionFeatureFlags: subscriptionSummary.subscriptionFeatureFlags,
+                    subscriptionLimits: subscriptionSummary.subscriptionLimits,
                     createdAt: user.createdAt
                 };
             } else {
@@ -188,9 +194,13 @@ exports.login = asyncHandler(async (req, res, next) => {
                     lastName: user.lastName,
                     email: user.email,
                     organizationId: user.organization?._id || user.organization || null,
-                    subscriptionPlan: user.organization?.subscriptionPlan || null,
-                    subscriptionStatus: user.organization?.subscriptionStatus || 'active',
-                    subscriptionExpiresAt: user.organization?.subscriptionExpiresAt || null
+                    subscriptionPlan: subscriptionSummary.subscriptionPlan,
+                    subscriptionLabel: subscriptionSummary.subscriptionLabel,
+                    subscriptionStatus: subscriptionSummary.subscriptionStatus,
+                    subscriptionExpiresAt: subscriptionSummary.subscriptionExpiresAt,
+                    subscriptionFeatures: subscriptionSummary.subscriptionFeatures,
+                    subscriptionFeatureFlags: subscriptionSummary.subscriptionFeatureFlags,
+                    subscriptionLimits: subscriptionSummary.subscriptionLimits
                 };
 
                 if (user.role && typeof user.role === 'object' && user.role.name) {
@@ -256,6 +266,8 @@ exports.login = asyncHandler(async (req, res, next) => {
         { expiresIn: process.env.JWT_EXPIRE || '30d' }
     );
 
+    const subscriptionSummary = getSubscriptionSummary(user.organization);
+
     console.log('✅ Login successful for:', userType, user.email);
 
     // 8. Send response with token and user data
@@ -288,9 +300,13 @@ exports.login = asyncHandler(async (req, res, next) => {
                 adminId: user.adminId,
                 status: user.status,
                 role: 'employee',
-                subscriptionPlan: user.organization?.subscriptionPlan || null,
-                subscriptionStatus: user.organization?.subscriptionStatus || 'active',
-                subscriptionExpiresAt: user.organization?.subscriptionExpiresAt || null,
+                subscriptionPlan: subscriptionSummary.subscriptionPlan,
+                subscriptionLabel: subscriptionSummary.subscriptionLabel,
+                subscriptionStatus: subscriptionSummary.subscriptionStatus,
+                subscriptionExpiresAt: subscriptionSummary.subscriptionExpiresAt,
+                subscriptionFeatures: subscriptionSummary.subscriptionFeatures,
+                subscriptionFeatureFlags: subscriptionSummary.subscriptionFeatureFlags,
+                subscriptionLimits: subscriptionSummary.subscriptionLimits,
                 createdAt: user.createdAt
             }
         });
@@ -325,15 +341,17 @@ exports.login = asyncHandler(async (req, res, next) => {
                 lastName: user.lastName,
                 email: user.email,
                 organizationId: user.organization?._id || user.organization || null,
-                subscriptionPlan: user.organization?.subscriptionPlan || null,
-                subscriptionStatus: user.organization?.subscriptionStatus || 'active',
-                subscriptionExpiresAt: user.organization?.subscriptionExpiresAt || null
+                subscriptionPlan: subscriptionSummary.subscriptionPlan,
+                subscriptionLabel: subscriptionSummary.subscriptionLabel,
+                subscriptionStatus: subscriptionSummary.subscriptionStatus,
+                subscriptionExpiresAt: subscriptionSummary.subscriptionExpiresAt,
+                subscriptionFeatures: subscriptionSummary.subscriptionFeatures,
+                subscriptionFeatureFlags: subscriptionSummary.subscriptionFeatureFlags,
+                subscriptionLimits: subscriptionSummary.subscriptionLimits
             }
         };
 
-        // Add role details if available
         if (user.role && typeof user.role === 'object' && user.role.name) {
-            const permissions = await getEffectivePermissionsForRole(user.role);
             responseData.user.role = {
                 id: user.role._id,
                 name: user.role.name,

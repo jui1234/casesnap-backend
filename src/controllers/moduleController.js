@@ -45,6 +45,8 @@ exports.getModules = asyncHandler(async (req, res, next) => {
         .sort({ name: 1 })
         .lean();
 
+    const actionOpts = { includeAssignee };
+
     const data = modules.map((m) => ({
         _id: m._id,
         name: m.name,

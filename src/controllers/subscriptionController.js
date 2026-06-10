@@ -1,9 +1,11 @@
 // controllers/subscriptionController.js
 
 const Subscription = require('../models/Subscription');
+const SubscriptionPlan = require('../models/SubscriptionPlan');
 const Organization = require('../models/Organization');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
+const { getSubscriptionSummary, normalizePlanName } = require('../utils/subscriptionFeatureUtils');
 
 // @desc      Get all subscriptions (super admin only)
 // @route     GET /api/subscriptions
@@ -80,6 +82,107 @@ exports.getOrganizationSubscription = asyncHandler(async (req, res, next) => {
     res.status(200).json({
         success: true,
         data: subscription
+    });
+});
+
+// @desc      List available subscription plans
+// @route     GET /api/subscriptions/plans
+// @access    Private (Authenticated users)
+exports.getSubscriptionPlans = asyncHandler(async (req, res, next) => {
+    const plans = await SubscriptionPlan.find({ isActive: true })
+        .select('-__v')
+        .sort({ price: 1 })
+        .lean();
+
+    res.status(200).json({
+        success: true,
+        count: plans.length,
+        data: plans
+    });
+});
+
+// @desc      Assign a plan to an organization
+// @route     PUT /api/subscriptions/organizations/:organizationId/assign
+// @access    Private (Super Admin)
+exports.assignSubscriptionPlanToOrganization = asyncHandler(async (req, res, next) => {
+    const { organizationId } = req.params;
+    const { planName, planId, expiresAt, status, price, currency, billingCycle, autoRenew, notes } = req.body;
+
+    if (!planName && !planId) {
+        return next(new ErrorResponse('Plan name or plan ID is required', 400));
+    }
+
+    let plan;
+    if (planId) {
+        plan = await SubscriptionPlan.findById(planId);
+    }
+    if (!plan && planName) {
+        const normalizedPlanName = normalizePlanName(planName);
+        plan = await SubscriptionPlan.findOne({ planName: normalizedPlanName, isActive: true });
+    }
+
+    if (!plan) {
+        return next(new ErrorResponse('Subscription plan not found', 404));
+    }
+
+    const organization = await Organization.findById(organizationId);
+    if (!organization) {
+        return next(new ErrorResponse('Organization not found', 404));
+    }
+
+    organization.subscriptionPlan = plan.planName;
+    organization.subscriptionStatus = status || 'active';
+
+    if (expiresAt) {
+        const parsedDate = new Date(expiresAt);
+        if (Number.isNaN(parsedDate.getTime())) {
+            return next(new ErrorResponse('Invalid expiresAt date format', 400));
+        }
+        organization.subscriptionExpiresAt = parsedDate;
+    } else if (plan.planName === 'free') {
+        const trialExpiresAt = new Date();
+        trialExpiresAt.setDate(trialExpiresAt.getDate() + 14);
+        organization.subscriptionExpiresAt = trialExpiresAt;
+    }
+
+    await organization.save();
+
+    res.status(200).json({
+        success: true,
+        message: 'Subscription plan assigned successfully',
+        data: {
+            organizationId: organization._id,
+            subscriptionPlan: organization.subscriptionPlan,
+            subscriptionStatus: organization.subscriptionStatus,
+            subscriptionExpiresAt: organization.subscriptionExpiresAt,
+            plan
+        }
+    });
+});
+
+// @desc      Get current user's organization subscription details
+// @route     GET /api/subscriptions/current
+// @access    Private (Authenticated users)
+exports.getCurrentSubscription = asyncHandler(async (req, res, next) => {
+    if (!req.user || !req.user.organization) {
+        return next(new ErrorResponse('Organization subscription information is unavailable', 404));
+    }
+
+    const summary = getSubscriptionSummary(req.user.organization);
+
+    res.status(200).json({
+        success: true,
+        data: {
+            subscriptionPlan: summary.subscriptionPlan,
+            subscriptionLabel: summary.subscriptionLabel,
+            subscriptionStatus: summary.subscriptionStatus,
+            subscriptionExpiresAt: summary.subscriptionExpiresAt,
+            subscriptionFeatures: summary.subscriptionFeatures,
+            subscriptionFeatureFlags: summary.subscriptionFeatureFlags,
+            subscriptionLimits: summary.subscriptionLimits,
+            isSubscriptionActive: summary.isSubscriptionActive,
+            isSubscriptionExpired: summary.isSubscriptionExpired
+        }
     });
 });
 

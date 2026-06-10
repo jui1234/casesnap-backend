@@ -25,6 +25,7 @@ const {
 
 const { protect } = require('../middleware/auth');
 const { loadUserRole, checkPermission, requireCaseBulkAssignAccess } = require('../middleware/rbac');
+const { checkSubscriptionFeature } = require('../middleware/subscriptionFeature');
 
 router.use(protect);
 router.use(loadUserRole);
@@ -53,28 +54,28 @@ const normalizeExcelFile = (req, res, next) => {
 
 router.post('/', checkPermission('cases', 'create'), createCase);
 router.get('/', checkPermission('cases', 'read'), getCases);
-router.get('/assignees', checkPermission('cases', 'read'), getCaseAssignees);
+router.get('/assignees', checkPermission('cases', 'read'), checkSubscriptionFeature('case_assignment'), getCaseAssignees);
 
 // Excel import/export
-router.get('/excel/template', checkPermission('cases', 'read'), downloadCaseExcelTemplate);
-router.get('/excel/export', checkPermission('cases', 'read'), exportCasesToExcel);
-router.post('/excel/preview', checkPermission('cases', 'create'), excelUpload.fields([
+router.get('/excel/template', checkPermission('cases', 'read'), checkSubscriptionFeature('excel_import_export'), downloadCaseExcelTemplate);
+router.get('/excel/export', checkPermission('cases', 'read'), checkSubscriptionFeature('excel_import_export'), exportCasesToExcel);
+router.post('/excel/preview', checkPermission('cases', 'create'), checkSubscriptionFeature('excel_import_export'), excelUpload.fields([
     { name: 'file', maxCount: 1 },
     { name: 'excel', maxCount: 1 },
     { name: 'upload', maxCount: 1 }
 ]), normalizeExcelFile, previewCasesExcelImport);
-router.post('/excel/import', checkPermission('cases', 'create'), excelUpload.fields([
+router.post('/excel/import', checkPermission('cases', 'create'), checkSubscriptionFeature('excel_import_export'), excelUpload.fields([
     { name: 'file', maxCount: 1 },
     { name: 'excel', maxCount: 1 },
     { name: 'upload', maxCount: 1 }
 ]), normalizeExcelFile, importCasesFromExcel);
 
-router.post('/bulk-assign', checkPermission('cases', 'read'), requireCaseBulkAssignAccess, bulkAssignCases);
+router.post('/bulk-assign', checkPermission('cases', 'read'), checkSubscriptionFeature('case_assignment'), requireCaseBulkAssignAccess, bulkAssignCases);
 
 router.get('/:id', checkPermission('cases', 'read'), getCase);
 router.post('/:id/stages', checkPermission('cases', 'update'), addCaseStage);
 router.put('/:id/stages/:stageId', checkPermission('cases', 'update'), updateCaseStage);
-router.patch('/:id/stages/:stageId/confirm', checkPermission('cases', 'update'), confirmCaseStage);
+router.patch('/:id/stages/:stageId/confirm', checkPermission('cases', 'update'), checkSubscriptionFeature('case_approval'), confirmCaseStage);
 router.put('/:id', checkPermission('cases', 'update'), updateCase);
 router.delete('/:id', checkPermission('cases', 'delete'), deleteCase);
 
