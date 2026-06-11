@@ -20,6 +20,7 @@ const errorHandler = require('./middleware/error');
 const path = require('path');
 const { initializeEmailService } = require('./utils/gmailService');
 const { startCaseStageReminderJob } = require('./utils/caseStageReminderJob');
+const { initializeSubscriptionPlans } = require('./utils/initializeSubscriptionPlans');
 
 const app = express();
 const PORT = process.env.PORT || 5004;
@@ -102,10 +103,11 @@ const connectDB = async () => {
 // Connect to the database
 connectDB();
 
-// Initialize default modules after database connection
+// Initialize default modules and subscription plans after database connection
 mongoose.connection.once('open', async () => {
     const { initializeDefaultModules } = require('./utils/initializeModules');
     await initializeDefaultModules();
+    await initializeSubscriptionPlans();
     startCaseStageReminderJob();
 });
 

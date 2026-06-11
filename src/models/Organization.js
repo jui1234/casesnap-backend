@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const { generateOrganizationId } = require('../utils/idGenerator');
+const { normalizePlanName } = require('../utils/subscriptionFeatureUtils');
 
 const OrganizationSchema = new mongoose.Schema({
     _id: {
@@ -80,10 +81,7 @@ const OrganizationSchema = new mongoose.Schema({
     subscriptionPlan: {
         type: String,
         required: [true, 'Please select a subscription plan'],
-        enum: {
-            values: ['free', 'base', 'popular'],
-            message: 'Subscription plan must be one of: free, base, popular'
-        },
+        set: normalizePlanName,
         default: 'free',
         trim: true
     },
