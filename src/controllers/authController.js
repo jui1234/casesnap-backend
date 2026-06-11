@@ -351,7 +351,9 @@ exports.login = asyncHandler(async (req, res, next) => {
             }
         };
 
+        let permissions;
         if (user.role && typeof user.role === 'object' && user.role.name) {
+            permissions = await getEffectivePermissionsForRole(user.role);
             responseData.user.role = {
                 id: user.role._id,
                 name: user.role.name,

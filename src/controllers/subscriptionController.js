@@ -7,6 +7,24 @@ const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
 const { getSubscriptionSummary, normalizePlanName } = require('../utils/subscriptionFeatureUtils');
 
+const calculateAssignedPlanExpiry = (plan) => {
+    const expiresAt = new Date();
+    const normalizedPlanName = normalizePlanName(plan.planName);
+    const billingCycle = String(plan.billingCycle || '').toLowerCase().trim();
+
+    if (normalizedPlanName === 'free') {
+        expiresAt.setDate(expiresAt.getDate() + 14);
+        return expiresAt;
+    }
+
+    if (billingCycle === 'monthly' || normalizedPlanName.endsWith('_monthly')) {
+        expiresAt.setMonth(expiresAt.getMonth() + 1);
+        return expiresAt;
+    }
+
+    return null;
+};
+
 // @desc      Get all subscriptions (super admin only)
 // @route     GET /api/subscriptions
 // @access    Private (Super Admin)
@@ -94,10 +112,24 @@ exports.getSubscriptionPlans = asyncHandler(async (req, res, next) => {
         .sort({ price: 1 })
         .lean();
 
+    let currentPlanName = null;
+    if (req.user && req.user.organization) {
+        const summary = getSubscriptionSummary(req.user.organization);
+        currentPlanName = summary.subscriptionPlan;
+    }
+
+    const plansWithSelection = plans.map((plan) => {
+        const normalizedPlan = normalizePlanName(plan.planName);
+        return {
+            ...plan,
+            isCurrentPlan: currentPlanName ? normalizedPlan === currentPlanName : false
+        };
+    });
+
     res.status(200).json({
         success: true,
-        count: plans.length,
-        data: plans
+        count: plansWithSelection.length,
+        data: plansWithSelection
     });
 });
 
@@ -106,7 +138,7 @@ exports.getSubscriptionPlans = asyncHandler(async (req, res, next) => {
 // @access    Private (Super Admin)
 exports.assignSubscriptionPlanToOrganization = asyncHandler(async (req, res, next) => {
     const { organizationId } = req.params;
-    const { planName, planId, expiresAt, status, price, currency, billingCycle, autoRenew, notes } = req.body;
+    const { planName, planId, status } = req.body;
 
     if (!planName && !planId) {
         return next(new ErrorResponse('Plan name or plan ID is required', 400));
@@ -132,18 +164,7 @@ exports.assignSubscriptionPlanToOrganization = asyncHandler(async (req, res, nex
 
     organization.subscriptionPlan = plan.planName;
     organization.subscriptionStatus = status || 'active';
-
-    if (expiresAt) {
-        const parsedDate = new Date(expiresAt);
-        if (Number.isNaN(parsedDate.getTime())) {
-            return next(new ErrorResponse('Invalid expiresAt date format', 400));
-        }
-        organization.subscriptionExpiresAt = parsedDate;
-    } else if (plan.planName === 'free') {
-        const trialExpiresAt = new Date();
-        trialExpiresAt.setDate(trialExpiresAt.getDate() + 14);
-        organization.subscriptionExpiresAt = trialExpiresAt;
-    }
+    organization.subscriptionExpiresAt = calculateAssignedPlanExpiry(plan);
 
     await organization.save();
 
