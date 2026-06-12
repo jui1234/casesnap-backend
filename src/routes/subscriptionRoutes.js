@@ -3,34 +3,30 @@
 const express = require('express');
 const router = express.Router();
 const {
-    getSubscriptions,
-    getSubscription,
     getOrganizationSubscription,
-    createSubscription,
-    updateSubscription,
-    deleteSubscription,
-    renewSubscription,
-    getSubscriptionStats
+    getCurrentSubscription,
+    getSubscriptionPlans,
+    assignSubscriptionPlanToOrganization
 } = require('../controllers/subscriptionController');
 
-const { protect } = require('../middleware/auth');
+const { protectAllowExpiredSuperAdmin, protectOptional } = require('../middleware/auth');
 const { loadUserRole, checkPermission } = require('../middleware/rbac');
 
-// All subscription routes require authentication and permission check
-router.use(protect);
+// Subscription plan list is public so it can be used during organization setup.
+// If a valid token is sent, the controller will also mark the current plan.
+router.get('/plans', protectOptional, getSubscriptionPlans);
+
+// Remaining subscription routes require authentication.
+router.use(protectAllowExpiredSuperAdmin);
+
+// Current organization subscription details available to any authenticated user
+router.get('/current', getCurrentSubscription);
+
+// Admin-only subscription assignment routes
 router.use(loadUserRole);
 
-// Subscription CRUD routes with permission-based access control
-// Special routes must come before parameter routes to avoid conflicts
-router.get('/stats/overview', checkPermission('subscription', 'read'), getSubscriptionStats);
+router.put('/organizations/:organizationId/assign', checkPermission('subscription', 'update'), assignSubscriptionPlanToOrganization);
+router.post('/organizations/:organizationId/assign', checkPermission('subscription', 'update'), assignSubscriptionPlanToOrganization);
 router.get('/org/:organizationId', checkPermission('subscription', 'read'), getOrganizationSubscription);
-router.post('/:id/renew', checkPermission('subscription', 'update'), renewSubscription);
-
-// Generic routes
-router.get('/', checkPermission('subscription', 'read'), getSubscriptions);
-router.post('/', checkPermission('subscription', 'create'), createSubscription);
-router.get('/:id', checkPermission('subscription', 'read'), getSubscription);
-router.put('/:id', checkPermission('subscription', 'update'), updateSubscription);
-router.delete('/:id', checkPermission('subscription', 'delete'), deleteSubscription);
 
 module.exports = router;
