@@ -5,37 +5,18 @@
 const User = require('../models/User');
 const Role = require('../models/Role');
 const Organization = require('../models/Organization');
-
-/** Plan-based assignee limits: free (14-day trial) = 2, base = 4, popular (professional) = 10 */
-const ASSIGNEE_LIMITS = {
-    free: 2,
-    base: 4,
-    popular: 10
-};
-
-/** Map display names / variations to plan keys */
-const PLAN_ALIASES = {
-    free: 'free',
-    base: 'base',
-    popular: 'popular',
-    '14 days free trial': 'free',
-    '14-day free trial': 'free',
-    trial: 'free',
-    professional: 'popular'
-};
+const { getPlanLimits, normalizePlanName } = require('./subscriptionFeatureUtils');
 
 /**
  * Get max assignees allowed for a subscription plan
- * @param {string} plan - 'free' | 'base' | 'popular' (or display name like "14 Days Free Trial")
+ * @param {string} plan
  * @returns {number}
  */
 exports.getAssigneeLimit = (plan) => {
-    const key = ((plan || 'free') + '').toLowerCase().trim();
-    const mapped = PLAN_ALIASES[key] || key;
-    return ASSIGNEE_LIMITS[mapped] != null ? ASSIGNEE_LIMITS[mapped] : ASSIGNEE_LIMITS.free;
+    const limits = getPlanLimits(normalizePlanName(plan || 'free'));
+    return limits.maxAssignees || 2;
 };
 
-/** SUPER_ADMIN can always assign client/case; plan limits (2/4/10) apply only to other assignees */
 const isSuperAdminRole = (role) =>
     role && role.priority === 1 && role.isSystemRole === true;
 
@@ -80,43 +61,35 @@ exports.canAssignModule = (userRole, moduleName) => {
 };
 
 /**
- * Count roles that have assignee permission (for plan limit when creating roles).
- * SUPER_ADMIN role is excluded. Used to block creating too many assignee roles.
+ * Count roles that can assign (for plan limit when creating roles).
+ * Includes SUPER_ADMIN because free plan allows 2 assignees including super admin.
  * @param {string} organizationId
  * @returns {Promise<number>}
  */
 exports.getAssigneeRoleCount = async (organizationId) => {
     return Role.countDocuments({
         organization: organizationId,
-        $and: [
-            {
-                $or: [
-                    { 'permissions': { $elemMatch: { module: 'client', actions: 'assignee' } } },
-                    { 'permissions': { $elemMatch: { module: 'cases', actions: 'assignee' } } }
-                ]
-            },
-            { $or: [{ priority: { $ne: 1 } }, { isSystemRole: false }] }
+        $or: [
+            { priority: 1, isSystemRole: true },
+            { 'permissions': { $elemMatch: { module: 'client', actions: 'assignee' } } },
+            { 'permissions': { $elemMatch: { module: 'cases', actions: 'assignee' } } }
         ]
     });
 };
 
 /**
  * Count distinct users in the organization who have assignee permission (for plan limit).
- * SUPER_ADMIN does not count; plan gives 2/4/10 assignees (non-SUPER_ADMIN only).
+ * Includes SUPER_ADMIN because free plan allows 2 assignees including super admin.
  * @param {string} organizationId
  * @returns {Promise<number>}
  */
 exports.getCurrentAssigneeCount = async (organizationId) => {
     const assigneeRoles = await Role.find({
         organization: organizationId,
-        $and: [
-            {
-                $or: [
-                    { 'permissions': { $elemMatch: { module: 'client', actions: 'assignee' } } },
-                    { 'permissions': { $elemMatch: { module: 'cases', actions: 'assignee' } } }
-                ]
-            },
-            { $or: [{ priority: { $ne: 1 } }, { isSystemRole: false }] }
+        $or: [
+            { priority: 1, isSystemRole: true },
+            { 'permissions': { $elemMatch: { module: 'client', actions: 'assignee' } } },
+            { 'permissions': { $elemMatch: { module: 'cases', actions: 'assignee' } } }
         ]
     })
         .select('_id')

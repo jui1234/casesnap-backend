@@ -35,10 +35,14 @@ const SubscriptionPlanSchema = new mongoose.Schema({
     },
     billingCycle: {
         type: String,
-        enum: ['monthly', 'quarterly', 'annual'],
+        enum: ['trial', 'monthly', 'quarterly', 'annual'],
         default: 'annual'
     },
     maxUsers: {
+        type: Number,
+        default: null
+    },
+    maxRoles: {
         type: Number,
         default: null
     },
@@ -47,6 +51,10 @@ const SubscriptionPlanSchema = new mongoose.Schema({
         default: null
     },
     maxCases: {
+        type: Number,
+        default: null
+    },
+    maxAssignees: {
         type: Number,
         default: null
     },

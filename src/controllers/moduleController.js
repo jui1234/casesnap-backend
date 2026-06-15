@@ -2,10 +2,117 @@
 // Module management controller
 
 const Module = require('../models/Module');
+const Role = require('../models/Role');
+const User = require('../models/User');
+const Client = require('../models/Client');
+const Case = require('../models/Case');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
 const { getActionsForModule } = require('../utils/roleUtils');
 const { validateOrganizationSubscription } = require('../utils/subscriptionUtils');
+const { getSubscriptionSummary, isFeatureEnabled } = require('../utils/subscriptionFeatureUtils');
+
+const PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE = 'Please upgrade to Professional Monthly plan to continue.';
+
+const getOrganizationId = (user) => {
+    const org = user && user.organization;
+    if (!org) return null;
+    if (typeof org === 'object' && org._id) return org._id;
+    return org;
+};
+
+const LIMIT_CONFIG = {
+    role: {
+        limitKey: 'maxRoles',
+        label: 'roles',
+        count: (organizationId) => Role.countDocuments({
+            organization: organizationId,
+            isSystemRole: false
+        })
+    },
+    user: {
+        limitKey: 'maxUsers',
+        label: 'users',
+        count: (organizationId) => User.countDocuments({
+            organization: organizationId,
+            status: { $nin: ['terminated'] }
+        })
+    },
+    client: {
+        limitKey: 'maxClients',
+        label: 'clients',
+        count: (organizationId) => Client.countDocuments({
+            organization: organizationId,
+            deletedAt: null
+        })
+    },
+    cases: {
+        limitKey: 'maxCases',
+        label: 'cases',
+        count: (organizationId) => Case.countDocuments({
+            organization: organizationId,
+            deletedAt: null
+        })
+    }
+};
+
+const buildLimitMessage = (summary, label, max) => {
+    const planLabel = summary.subscriptionLabel || 'Current';
+    const upgradeMessage = summary.subscriptionPlan === 'free'
+        ? PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE
+        : 'Please upgrade your plan to continue.';
+    return `${planLabel} plan allows only ${max} ${label}. ${upgradeMessage}`;
+};
+
+async function getModuleLimitInfo(user) {
+    const organizationId = getOrganizationId(user);
+    if (!user || !user.organization || !organizationId) return {};
+
+    const summary = getSubscriptionSummary(user.organization);
+    const limits = summary.subscriptionLimits || {};
+    const entries = Object.entries(LIMIT_CONFIG);
+
+    const counts = await Promise.all(entries.map(async ([moduleName, config]) => {
+        const max = limits[config.limitKey];
+        if (max === null || max === undefined) return [moduleName, null];
+
+        const used = await config.count(organizationId);
+        const remaining = Math.max(max - used, 0);
+        const canCreate = remaining > 0;
+
+        return [moduleName, {
+            limitKey: config.limitKey,
+            max,
+            used,
+            remaining,
+            canCreate,
+            message: canCreate ? null : buildLimitMessage(summary, config.label, max)
+        }];
+    }));
+
+    return counts.reduce((acc, [moduleName, info]) => {
+        if (info) acc[moduleName] = info;
+        return acc;
+    }, {});
+}
+
+function getModuleFeatureInfo(user, moduleName) {
+    if (!user || !user.organization) return null;
+
+    const name = String(moduleName || '').toLowerCase().trim();
+    if (name !== 'cases' && name !== 'client') return null;
+
+    const summary = getSubscriptionSummary(user.organization);
+    const subscriptionActive = summary.isSubscriptionActive;
+    const excelImportExportEnabled = subscriptionActive && isFeatureEnabled(user.organization, 'excel_import_export');
+    const caseAssignmentEnabled = subscriptionActive && isFeatureEnabled(user.organization, 'case_assignment');
+
+    return {
+        canImport: excelImportExportEnabled,
+        canExport: excelImportExportEnabled,
+        canBulkAssign: caseAssignmentEnabled
+    };
+}
 
 /**
  * @desc    Get all active modules (with allowed actions). Includes `assignee` on client/cases when
@@ -16,6 +123,7 @@ const { validateOrganizationSubscription } = require('../utils/subscriptionUtils
 exports.getModules = asyncHandler(async (req, res, next) => {
     let includeAssignee = false;
     let onlySubscriptionModule = false;
+    let moduleLimitInfo = {};
 
     if (req.user) {
         await req.user.populate({
@@ -33,6 +141,10 @@ exports.getModules = asyncHandler(async (req, res, next) => {
                 onlySubscriptionModule = true;
             }
         }
+
+        if (!onlySubscriptionModule) {
+            moduleLimitInfo = await getModuleLimitInfo(req.user);
+        }
     }
 
     const query = { isActive: true };
@@ -47,13 +159,20 @@ exports.getModules = asyncHandler(async (req, res, next) => {
 
     const actionOpts = { includeAssignee };
 
-    const data = modules.map((m) => ({
-        _id: m._id,
-        name: m.name,
-        displayName: m.displayName,
-        description: m.description,
-        actions: getActionsForModule(m.name, actionOpts)
-    }));
+    const data = modules.map((m) => {
+        const actions = getActionsForModule(m.name, actionOpts);
+        const featureInfo = getModuleFeatureInfo(req.user, m.name);
+
+        return {
+            _id: m._id,
+            name: m.name,
+            displayName: m.displayName,
+            description: m.description,
+            actions,
+            ...(moduleLimitInfo[m.name] ? { subscriptionLimit: moduleLimitInfo[m.name] } : {}),
+            ...(featureInfo ? { subscriptionFeatures: featureInfo } : {})
+        };
+    });
 
     res.status(200).json({
         success: true,

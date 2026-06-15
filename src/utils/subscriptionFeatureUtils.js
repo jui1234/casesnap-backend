@@ -14,45 +14,55 @@ const PLAN_CONFIG = {
         label: 'Free',
         features: [],
         limits: {
-            maxUsers: 3,
-            maxClients: 50,
-            maxCases: 100
+            maxRoles: 2,
+            maxUsers: 2,
+            maxClients: 2,
+            maxCases: 2,
+            maxAssignees: 2
         }
     },
     basic_monthly: {
         label: 'Basic Monthly',
         features: ['case_assignment', 'excel_import_export'],
         limits: {
+            maxRoles: 15,
             maxUsers: 15,
             maxClients: 250,
-            maxCases: 500
+            maxCases: 500,
+            maxAssignees: 4
         }
     },
     basic_yearly: {
         label: 'Basic Yearly',
         features: ['case_assignment', 'excel_import_export'],
         limits: {
+            maxRoles: 15,
             maxUsers: 15,
             maxClients: 250,
-            maxCases: 500
+            maxCases: 500,
+            maxAssignees: 4
         }
     },
     professional_monthly: {
         label: 'Professional Monthly',
         features: ['case_assignment', 'excel_import_export', 'case_approval', 'audit_logs', 'analytics'],
         limits: {
+            maxRoles: 50,
             maxUsers: 50,
             maxClients: 2000,
-            maxCases: 4000
+            maxCases: 4000,
+            maxAssignees: 10
         }
     },
     professional_yearly: {
         label: 'Professional Yearly',
         features: ['case_assignment', 'excel_import_export', 'case_approval', 'audit_logs', 'analytics'],
         limits: {
+            maxRoles: 50,
             maxUsers: 50,
             maxClients: 2000,
-            maxCases: 4000
+            maxCases: 4000,
+            maxAssignees: 10
         }
     }
 };

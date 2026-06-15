@@ -81,8 +81,8 @@ const SubscriptionSchema = new mongoose.Schema({
     billingCycle: {
         type: String,
         enum: {
-            values: ['monthly', 'quarterly', 'annual'],
-            message: 'Billing cycle must be one of: monthly, quarterly, annual'
+            values: ['trial', 'monthly', 'quarterly', 'annual'],
+            message: 'Billing cycle must be one of: trial, monthly, quarterly, annual'
         },
         default: 'annual'
     },

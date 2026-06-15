@@ -26,6 +26,7 @@ const {
 const { protect } = require('../middleware/auth');
 const { loadUserRole, checkPermission, requireCaseBulkAssignAccess } = require('../middleware/rbac');
 const { checkSubscriptionFeature } = require('../middleware/subscriptionFeature');
+const { checkCaseLimit } = require('../middleware/subscriptionLimits');
 
 router.use(protect);
 router.use(loadUserRole);
@@ -52,9 +53,9 @@ const normalizeExcelFile = (req, res, next) => {
     next();
 };
 
-router.post('/', checkPermission('cases', 'create'), createCase);
+router.post('/', checkPermission('cases', 'create'), checkCaseLimit, createCase);
 router.get('/', checkPermission('cases', 'read'), getCases);
-router.get('/assignees', checkPermission('cases', 'read'), checkSubscriptionFeature('case_assignment'), getCaseAssignees);
+router.get('/assignees', checkPermission('cases', 'read'), getCaseAssignees);
 
 // Excel import/export
 router.get('/excel/template', checkPermission('cases', 'read'), checkSubscriptionFeature('excel_import_export'), downloadCaseExcelTemplate);
