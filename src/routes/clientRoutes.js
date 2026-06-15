@@ -22,6 +22,7 @@ const {
 const { protect } = require('../middleware/auth');
 const { loadUserRole, checkPermission, requireClientBulkAssignAccess } = require('../middleware/rbac');
 const { checkSubscriptionFeature } = require('../middleware/subscriptionFeature');
+const { checkClientLimit } = require('../middleware/subscriptionLimits');
 
 // All routes require authentication and role loading
 router.use(protect);
@@ -50,7 +51,7 @@ const normalizeExcelFile = (req, res, next) => {
 };
 
 // CRUD routes with RBAC permissions
-router.post('/', checkPermission('client', 'create'), createClient);
+router.post('/', checkPermission('client', 'create'), checkClientLimit, createClient);
 router.get('/', checkPermission('client', 'read'), getClients);
 
 // Excel import/export

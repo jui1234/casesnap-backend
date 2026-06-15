@@ -9,6 +9,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
 const { getSuggestedPriority, validateRoleCreation, validatePermissions, getActionsForModule } = require('../utils/roleUtils');
 const { getAssigneeLimit, getCurrentAssigneeCount, getAssigneeRoleCount, roleHasAssigneePermission, checkAssigneeLimit } = require('../utils/assigneeUtils');
+const { PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE } = require('../middleware/subscriptionLimits');
 
 /**
  * @desc    Get suggested priority for new role
@@ -79,7 +80,7 @@ exports.createRole = asyncHandler(async (req, res, next) => {
         const currentAssigneeRoleCount = await getAssigneeRoleCount(organizationId);
         if (currentAssigneeRoleCount >= limit) {
             return next(new ErrorResponse(
-                `Assignee limit reached for your plan (${limit} assignee role(s)). Current: ${currentAssigneeRoleCount}. Upgrade plan to create more roles with assignee permission.`,
+                `Assignee limit reached for your plan (${limit} assignee role(s), including SUPER_ADMIN). Current: ${currentAssigneeRoleCount}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
                 400
             ));
         }
@@ -308,7 +309,7 @@ exports.updateRole = asyncHandler(async (req, res, next) => {
                 const currentAssigneeRoleCount = await getAssigneeRoleCount(organizationId);
                 if (currentAssigneeRoleCount >= limit) {
                     return next(new ErrorResponse(
-                        `Assignee limit reached for your plan (${limit} assignee role(s)). Current: ${currentAssigneeRoleCount}. Upgrade plan to add assignee permission to more roles.`,
+                        `Assignee limit reached for your plan (${limit} assignee role(s), including SUPER_ADMIN). Current: ${currentAssigneeRoleCount}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
                         400
                     ));
                 }
@@ -320,7 +321,7 @@ exports.updateRole = asyncHandler(async (req, res, next) => {
             const newAssigneesFromThisRole = roleAlreadyHadAssignee ? 0 : usersWithThisRole;
             if (currentCount + newAssigneesFromThisRole > limit) {
                 return next(new ErrorResponse(
-                    `Assignee limit reached for your plan (${limit} assignee(s)). Current: ${currentCount}. Upgrade plan to add more assignees.`,
+                    `Assignee limit reached for your plan (${limit} assignee(s), including SUPER_ADMIN). Current: ${currentCount}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
                     400
                 ));
             }
@@ -437,7 +438,7 @@ exports.assignRoleToUser = asyncHandler(async (req, res, next) => {
         const { allowed, current, limit } = await checkAssigneeLimit(organizationId, wasAlreadyAssignee);
         if (!allowed) {
             return next(new ErrorResponse(
-                `Assignee limit reached for your plan (${limit} assignee(s)). Current assignees: ${current}. Upgrade plan to add more assignees.`,
+                `Assignee limit reached for your plan (${limit} assignee(s), including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
                 400
             ));
         }

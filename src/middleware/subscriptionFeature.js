@@ -1,5 +1,6 @@
 const ErrorResponse = require('../utils/errorResponse');
 const { isFeatureEnabled, getSubscriptionSummary } = require('../utils/subscriptionFeatureUtils');
+const { PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE } = require('./subscriptionLimits');
 
 exports.checkSubscriptionFeature = (featureKey) => {
     return async (req, res, next) => {
@@ -15,6 +16,13 @@ exports.checkSubscriptionFeature = (featureKey) => {
             }
 
             if (!isFeatureEnabled(req.user.organization, featureKey)) {
+                if (subscriptionSummary.subscriptionPlan === 'free') {
+                    return next(new ErrorResponse(
+                        `This feature is not available on the Free plan. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
+                        403
+                    ));
+                }
+
                 return next(new ErrorResponse(
                     `This feature is not available on your current plan (${subscriptionSummary.subscriptionLabel}). Please upgrade to access ${featureKey.replace(/_/g, ' ')}.`,
                     403
