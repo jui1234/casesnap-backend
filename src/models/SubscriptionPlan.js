@@ -58,6 +58,10 @@ const SubscriptionPlanSchema = new mongoose.Schema({
         type: Number,
         default: null
     },
+    maxExcelImportRows: {
+        type: Number,
+        default: null
+    },
     isActive: {
         type: Boolean,
         default: true

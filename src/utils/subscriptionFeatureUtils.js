@@ -5,7 +5,14 @@ const { isSubscriptionExpired } = require('./subscriptionUtils');
 
 const LEGACY_PLAN_ALIASES = {
     free: 'free',
+    trial: 'free',
     base: 'basic_monthly',
+    basic: 'basic_monthly',
+    basic_plan: 'basic_monthly',
+    basicmonthly: 'basic_monthly',
+    basic_monthly_plan: 'basic_monthly',
+    basic_montly: 'basic_monthly',
+    basic_montlhy: 'basic_monthly',
     popular: 'professional_monthly'
 };
 
@@ -25,11 +32,12 @@ const PLAN_CONFIG = {
         label: 'Basic Monthly',
         features: ['case_assignment', 'excel_import_export'],
         limits: {
-            maxRoles: 15,
-            maxUsers: 15,
-            maxClients: 250,
-            maxCases: 500,
-            maxAssignees: 4
+            maxRoles: 5,
+            maxUsers: 150,
+            maxClients: 150,
+            maxCases: 150,
+            maxAssignees: 3,
+            maxExcelImportRows: 50
         }
     },
     basic_yearly: {
@@ -97,6 +105,14 @@ const getPlanLimits = (planName) => {
     return getPlanConfig(planName).limits || {};
 };
 
+const getExcelImportRowLimit = (organizationOrPlan, fallback = 5000) => {
+    const planName = typeof organizationOrPlan === 'object'
+        ? organizationOrPlan?.subscriptionPlan
+        : organizationOrPlan;
+    const limit = getPlanLimits(planName).maxExcelImportRows;
+    return limit || fallback;
+};
+
 const getSubscriptionSummary = (organization = {}) => {
     const planName = normalizePlanName(organization.subscriptionPlan);
     const config = getPlanConfig(planName);
@@ -130,6 +146,7 @@ module.exports = {
     getSubscriptionFeatures,
     getSubscriptionFeatureFlags,
     getPlanLimits,
+    getExcelImportRowLimit,
     getSubscriptionSummary,
     isFeatureEnabled
 };

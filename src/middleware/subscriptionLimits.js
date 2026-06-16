@@ -2,8 +2,10 @@ const Role = require('../models/Role');
 const User = require('../models/User');
 const Client = require('../models/Client');
 const Case = require('../models/Case');
+const Organization = require('../models/Organization');
+const Subscription = require('../models/Subscription');
 const ErrorResponse = require('../utils/errorResponse');
-const { getSubscriptionSummary } = require('../utils/subscriptionFeatureUtils');
+const { getSubscriptionSummary, normalizePlanName } = require('../utils/subscriptionFeatureUtils');
 
 const PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE = 'Please upgrade to Professional Monthly plan to continue.';
 
@@ -22,13 +24,55 @@ const limitExceededMessage = (summary, label, limit) => {
     return `${planLabel} plan allows only ${limit} ${label}. ${upgradeMessage}`;
 };
 
+const getOrganizationForLimitCheck = async (req) => {
+    const org = req.user && req.user.organization;
+    if (!org) return null;
+
+    const organizationId = getOrganizationId(req);
+    if (!organizationId) return null;
+
+    const organization = typeof org === 'object' && org.subscriptionPlan
+        ? org
+        : await Organization.findById(organizationId)
+        .select('subscriptionPlan subscriptionStatus subscriptionExpiresAt')
+        .lean();
+
+    const activeSubscription = await Subscription.findOne({
+        organization: organizationId,
+        status: 'active'
+    })
+        .sort({ createdAt: -1 })
+        .select('planName status expiresAt')
+        .lean();
+
+    if (
+        activeSubscription &&
+        normalizePlanName(activeSubscription.planName) !== 'free' &&
+        normalizePlanName(organization?.subscriptionPlan) === 'free'
+    ) {
+        return {
+            ...(organization || {}),
+            subscriptionPlan: activeSubscription.planName,
+            subscriptionStatus: activeSubscription.status,
+            subscriptionExpiresAt: activeSubscription.expiresAt
+        };
+    }
+
+    return organization;
+};
+
 const checkLimit = ({ limitKey, label, countDocuments }) => async (req, res, next) => {
     try {
         if (!req.user || !req.user.organization) {
             return next(new ErrorResponse('User subscription data is unavailable', 403));
         }
 
-        const summary = getSubscriptionSummary(req.user.organization);
+        const organization = await getOrganizationForLimitCheck(req);
+        if (!organization) {
+            return next(new ErrorResponse('Organization not found for this user', 400));
+        }
+
+        const summary = getSubscriptionSummary(organization);
         const limit = summary.subscriptionLimits ? summary.subscriptionLimits[limitKey] : null;
         if (limit === null || limit === undefined) return next();
 
