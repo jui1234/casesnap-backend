@@ -12,6 +12,7 @@ const jwt = require('jsonwebtoken'); // For generating tokens
 const { getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
 const { initializeDefaultModules } = require('../utils/initializeModules');
 const { getEffectivePermissionsForRole } = require('../utils/roleUtils');
+const { normalizePlanName } = require('../utils/subscriptionFeatureUtils');
 
 function resolveOrganizationId(user) {
     if (!user || user.organization == null) return null;
@@ -144,12 +145,12 @@ exports.initializeSetup = asyncHandler(async (req, res, next) => {
     
     // Validate subscription plan if provided
     if (orgData.subscriptionPlan) {
-        const validPlans = ['free', 'base', 'popular'];
-        if (!validPlans.includes(orgData.subscriptionPlan.toLowerCase())) {
+        const validPlans = ['free', 'basic_monthly', 'basic_yearly', 'professional_monthly', 'professional_yearly'];
+        const normalizedPlan = normalizePlanName(orgData.subscriptionPlan);
+        if (!validPlans.includes(normalizedPlan)) {
             return next(new ErrorResponse(`Invalid subscription plan. Must be one of: ${validPlans.join(', ')}`, 400));
         }
-        // Normalize to lowercase
-        orgData.subscriptionPlan = orgData.subscriptionPlan.toLowerCase();
+        orgData.subscriptionPlan = normalizedPlan;
     }
     // Note: Mongoose will handle the rest of the validation (required, unique, email format, etc.)
 

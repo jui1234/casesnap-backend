@@ -14,6 +14,7 @@ const {
 
 const { protect } = require('../middleware/auth');
 const { loadUserRole, canManageRole, checkPermission } = require('../middleware/rbac');
+const { checkRoleLimit } = require('../middleware/subscriptionLimits');
 
 // All routes require authentication and role loading
 router.use(protect);
@@ -32,6 +33,7 @@ router.get('/:roleId', checkPermission('role', 'read'), getRole);
 router.post(
     '/',
     checkPermission('role', 'create'),
+    checkRoleLimit,
     createRole
 );
 

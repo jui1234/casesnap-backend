@@ -6,14 +6,23 @@ const defaultPlans = [
     {
         planName: 'free',
         displayName: 'Free',
-        description: 'Basic free plan for small organizations.',
-        features: [],
+        description: '14-day free trial for small organizations.',
+        features: [
+            'Try CaseSnap free for 14 days',
+            'Create up to 2 custom roles',
+            'Invite up to 2 team members',
+            'Manage up to 2 clients',
+            'Create up to 2 cases',
+            'Assign work with up to 2 assignees'
+        ],
         price: 0,
         currency: 'INR',
-        billingCycle: 'annual',
-        maxUsers: 3,
-        maxClients: 50,
-        maxCases: 100,
+        billingCycle: 'trial',
+        maxRoles: 2,
+        maxUsers: 2,
+        maxClients: 2,
+        maxCases: 2,
+        maxAssignees: 2,
         isActive: true
     },
     {
@@ -24,9 +33,12 @@ const defaultPlans = [
         price: 999,
         currency: 'INR',
         billingCycle: 'monthly',
-        maxUsers: 15,
-        maxClients: 250,
-        maxCases: 500,
+        maxRoles: 5,
+        maxUsers: 150,
+        maxClients: 150,
+        maxCases: 150,
+        maxAssignees: 3,
+        maxExcelImportRows: 50,
         isActive: true
     },
     {
@@ -37,9 +49,11 @@ const defaultPlans = [
         price: 1999,
         currency: 'INR',
         billingCycle: 'monthly',
+        maxRoles: 50,
         maxUsers: 50,
         maxClients: 2000,
         maxCases: 4000,
+        maxAssignees: 10,
         isActive: true
     }
 ];
@@ -49,7 +63,7 @@ exports.initializeSubscriptionPlans = async () => {
         for (const plan of defaultPlans) {
             await SubscriptionPlan.updateOne(
                 { planName: plan.planName },
-                { $setOnInsert: plan },
+                { $set: plan },
                 { upsert: true }
             );
         }

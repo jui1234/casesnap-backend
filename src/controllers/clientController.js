@@ -12,6 +12,8 @@ const {
 } = require('../utils/assigneeUtils');
 const { sendEncryptedJson } = require('../utils/responseEncryption');
 const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber, toOptionalDate, formatMongooseErrorForUser } = require('../utils/excelUtils');
+const { getExcelImportRowLimit } = require('../utils/subscriptionFeatureUtils');
+const { getOrganizationIdFromUser, getEffectiveSubscriptionSummaryForUser } = require('../utils/subscriptionContext');
 
 const canViewAllClients = (userRole) => canAssignModule(userRole, 'client');
 
@@ -67,6 +69,21 @@ const CLIENT_EXCEL_HEADERS = [
     'status',
     'notes'
 ];
+
+function getRemainingLimitInfo(summary, limitKey, current) {
+    const max = summary?.subscriptionLimits?.[limitKey];
+    if (max === null || max === undefined) return null;
+    return {
+        max,
+        used: current,
+        remaining: Math.max(max - current, 0)
+    };
+}
+
+function buildRemainingImportLimitMessage(summary, label, limitInfo) {
+    const planLabel = summary?.subscriptionLabel || 'Current';
+    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s). Please import only ${limitInfo.remaining} ${label}.`;
+}
 
 /**
  * @desc    Create a new client
@@ -937,9 +954,11 @@ exports.exportClientsToExcel = asyncHandler(async (req, res) => {
  * @access  Private (Requires 'create' permission on 'client' module)
  */
 exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
-    const organizationId = req.user.organization;
+    const organizationId = getOrganizationIdFromUser(req.user);
     const userId = req.user._id;
     const importerIsAssignee = req.userRole && canAssignModule(req.userRole, 'client');
+    const subscriptionSummary = await getEffectiveSubscriptionSummaryForUser(req.user);
+    const importRowLimit = getExcelImportRowLimit(subscriptionSummary?.subscriptionPlan);
 
     const file = req.file;
     if (!file || !file.buffer) {
@@ -949,7 +968,7 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
     const parsed = parseExcelFromBuffer(file.buffer, {
         sheetName: CLIENT_EXCEL_SHEET,
         expectedHeaders: CLIENT_EXCEL_HEADERS,
-        maxRows: 5000
+        maxRows: importRowLimit
     });
 
     if (!parsed.ok) {
@@ -957,8 +976,10 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
     }
 
     const errors = [];
-    let createdCount = 0;
     let skippedCount = 0;
+    const pendingClients = [];
+    const currentClientCount = await Client.countDocuments({ organization: organizationId, deletedAt: null });
+    const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
 
     for (const row of parsed.rows) {
         const r = row.rowNumber;
@@ -1020,8 +1041,9 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
             }
         }
 
-        try {
-            await Client.create({
+        pendingClients.push({
+            row: r,
+            doc: {
                 firstName,
                 lastName,
                 email,
@@ -1039,16 +1061,29 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
                 aadharCardNumber,
                 panCardNumber,
                 fees,
-                // Excel template does not include assignedTo; default is unassigned.
                 assignedTo: null,
                 status,
                 notes,
                 organization: organizationId,
                 createdBy: userId
-            });
+            }
+        });
+    }
+
+    if (clientLimitInfo && pendingClients.length > clientLimitInfo.remaining) {
+        return next(new ErrorResponse(
+            buildRemainingImportLimitMessage(subscriptionSummary, 'clients', clientLimitInfo),
+            403
+        ));
+    }
+
+    let createdCount = 0;
+    for (const pending of pendingClients) {
+        try {
+            await Client.create(pending.doc);
             createdCount++;
         } catch (e) {
-            errors.push({ row: r, errors: formatMongooseErrorForUser(e) });
+            errors.push({ row: pending.row, errors: formatMongooseErrorForUser(e) });
             skippedCount++;
         }
     }
@@ -1093,9 +1128,10 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
  * @access  Private (Requires 'create' permission on 'client' module)
  */
 exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
-    const organizationId = req.user.organization;
-    const userId = req.user._id;
+    const organizationId = getOrganizationIdFromUser(req.user);
     const importerIsAssignee = req.userRole && canAssignModule(req.userRole, 'client');
+    const subscriptionSummary = await getEffectiveSubscriptionSummaryForUser(req.user);
+    const importRowLimit = getExcelImportRowLimit(subscriptionSummary?.subscriptionPlan);
 
     const file = req.file;
     if (!file || !file.buffer) {
@@ -1105,7 +1141,7 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
     const parsed = parseExcelFromBuffer(file.buffer, {
         sheetName: CLIENT_EXCEL_SHEET,
         expectedHeaders: CLIENT_EXCEL_HEADERS,
-        maxRows: 5000
+        maxRows: importRowLimit
     });
 
     if (!parsed.ok) {
@@ -1114,6 +1150,8 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
 
     const preview = [];
     const errors = [];
+    const currentClientCount = await Client.countDocuments({ organization: organizationId, deletedAt: null });
+    const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
 
     for (const row of parsed.rows) {
         const r = row.rowNumber;
@@ -1206,6 +1244,12 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
         });
     }
 
+    const validRows = preview.filter((p) => p.willCreate).length;
+    const clientLimitExceeded = Boolean(clientLimitInfo && validRows > clientLimitInfo.remaining);
+    if (clientLimitExceeded) {
+        errors.push({ row: null, errors: [buildRemainingImportLimitMessage(subscriptionSummary, 'clients', clientLimitInfo)] });
+    }
+
     res.status(200).json({
         success: true,
         message: 'Client Excel preview generated',
@@ -1213,9 +1257,18 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
             rows: preview,
             totals: {
                 totalRows: preview.length,
-                validRows: preview.filter((p) => p.willCreate).length,
+                validRows,
                 invalidRows: preview.filter((p) => !p.willCreate).length
             },
+            subscriptionLimit: clientLimitInfo ? {
+                limitKey: 'maxClients',
+                max: clientLimitInfo.max,
+                used: clientLimitInfo.used,
+                remaining: clientLimitInfo.remaining,
+                requested: validRows,
+                canImport: !clientLimitExceeded,
+                message: clientLimitExceeded ? buildRemainingImportLimitMessage(subscriptionSummary, 'clients', clientLimitInfo) : null
+            } : null,
             errors
         }
     });

@@ -8,6 +8,7 @@ const ErrorResponse = require('../utils/errorResponse');
 const crypto = require('crypto');
 const { sendUserInvitation } = require('../utils/gmailService');
 const { roleHasAssigneePermission, checkAssigneeLimit, getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
+const { PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE } = require('../middleware/subscriptionLimits');
 
 // @desc      Send user invitation
 // @route     POST /api/users/invite
@@ -85,7 +86,7 @@ exports.sendUserInvitation = asyncHandler(async (req, res, next) => {
         const { allowed, current, limit } = await checkAssigneeLimit(organizationId, false);
         if (!allowed) {
             return next(new ErrorResponse(
-                `Assignee limit reached for your plan (${limit} assignee(s)). Current assignees: ${current}. Upgrade plan to invite more users with assignee permission.`,
+                `Assignee limit reached for your plan (${limit} assignee(s), including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
                 400
             ));
         }
@@ -792,7 +793,7 @@ exports.updateUser = asyncHandler(async (req, res, next) => {
             const { allowed, current, limit } = await checkAssigneeLimit(organizationId, wasAlreadyAssignee);
             if (!allowed) {
                 return next(new ErrorResponse(
-                    `Assignee limit reached for your plan (${limit} assignee(s)). Current assignees: ${current}. Upgrade plan to add more assignees.`,
+                    `Assignee limit reached for your plan (${limit} assignee(s), including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
                     400
                 ));
             }
