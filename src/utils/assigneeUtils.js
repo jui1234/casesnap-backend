@@ -10,11 +10,11 @@ const { getPlanLimits, normalizePlanName } = require('./subscriptionFeatureUtils
 /**
  * Get max assignees allowed for a subscription plan
  * @param {string} plan
- * @returns {number}
+ * @returns {number|null}
  */
 exports.getAssigneeLimit = (plan) => {
     const limits = getPlanLimits(normalizePlanName(plan || 'free'));
-    return limits.maxAssignees || 2;
+    return limits.maxAssignees === undefined ? 2 : limits.maxAssignees;
 };
 
 const isSuperAdminRole = (role) =>
@@ -142,13 +142,16 @@ exports.getAssigneeUserIdsForModule = async (organizationId, moduleName) => {
  * Check if adding one more assignee would exceed plan limit
  * @param {string} organizationId
  * @param {boolean} [isAlreadyAssignee] - if the user being added is already an assignee (e.g. role change)
- * @returns {Promise<{ allowed: boolean, current: number, limit: number }>}
+ * @returns {Promise<{ allowed: boolean, current: number, limit: number|null }>}
  */
 exports.checkAssigneeLimit = async (organizationId, isAlreadyAssignee = false) => {
     const org = await Organization.findById(organizationId).select('subscriptionPlan').lean();
     const plan = org?.subscriptionPlan || 'free';
     const limit = exports.getAssigneeLimit(plan);
     const current = await exports.getCurrentAssigneeCount(organizationId);
+    if (limit === null || limit === undefined) {
+        return { allowed: true, current, limit };
+    }
     const effectiveNew = isAlreadyAssignee ? 0 : 1;
     const allowed = current + effectiveNew <= limit;
     return { allowed, current, limit };

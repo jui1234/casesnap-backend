@@ -55,11 +55,12 @@ const PLAN_CONFIG = {
         label: 'Professional Monthly',
         features: ['case_assignment', 'excel_import_export', 'case_approval', 'audit_logs', 'analytics'],
         limits: {
-            maxRoles: 50,
-            maxUsers: 50,
-            maxClients: 2000,
-            maxCases: 4000,
-            maxAssignees: 10
+            maxRoles: null,
+            maxUsers: null,
+            maxClients: null,
+            maxCases: null,
+            maxAssignees: null,
+            maxExcelImportRows: 100
         }
     },
     professional_yearly: {

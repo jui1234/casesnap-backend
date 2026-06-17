@@ -93,12 +93,14 @@ exports.createRole = asyncHandler(async (req, res, next) => {
     if (permissionsWithAssignee.length > 0) {
         const planName = await getEffectiveOrganizationPlanName(organizationId);
         const limit = getAssigneeLimit(planName);
-        const currentAssigneeRoleCount = await getAssigneeRoleCount(organizationId);
-        if (currentAssigneeRoleCount >= limit) {
-            return next(new ErrorResponse(
-                `Assignee limit reached for your plan (${limit} assignee role(s), including SUPER_ADMIN). Current: ${currentAssigneeRoleCount}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
-                400
-            ));
+        if (limit !== null && limit !== undefined) {
+            const currentAssigneeRoleCount = await getAssigneeRoleCount(organizationId);
+            if (currentAssigneeRoleCount >= limit) {
+                return next(new ErrorResponse(
+                    `Assignee limit reached for your plan (${limit} assignee role(s), including SUPER_ADMIN). Current: ${currentAssigneeRoleCount}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
+                    400
+                ));
+            }
         }
     }
 
@@ -321,7 +323,7 @@ exports.updateRole = asyncHandler(async (req, res, next) => {
             const limit = getAssigneeLimit(planName);
 
             // Block if adding assignee to a new role would exceed assignee ROLE limit
-            if (!roleAlreadyHadAssignee) {
+            if (!roleAlreadyHadAssignee && limit !== null && limit !== undefined) {
                 const currentAssigneeRoleCount = await getAssigneeRoleCount(organizationId);
                 if (currentAssigneeRoleCount >= limit) {
                     return next(new ErrorResponse(
