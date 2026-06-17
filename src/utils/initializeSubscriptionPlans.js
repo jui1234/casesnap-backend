@@ -33,11 +33,12 @@ const defaultPlans = [
         price: 999,
         currency: 'INR',
         billingCycle: 'monthly',
-        maxRoles: 15,
-        maxUsers: 15,
-        maxClients: 250,
-        maxCases: 500,
-        maxAssignees: 4,
+        maxRoles: 5,
+        maxUsers: 150,
+        maxClients: 150,
+        maxCases: 150,
+        maxAssignees: 3,
+        maxExcelImportRows: 50,
         isActive: true
     },
     {
@@ -48,11 +49,12 @@ const defaultPlans = [
         price: 1999,
         currency: 'INR',
         billingCycle: 'monthly',
-        maxRoles: 50,
-        maxUsers: 50,
-        maxClients: 2000,
-        maxCases: 4000,
-        maxAssignees: 10,
+        maxRoles: null,
+        maxUsers: null,
+        maxClients: null,
+        maxCases: null,
+        maxAssignees: null,
+        maxExcelImportRows: 100,
         isActive: true
     }
 ];

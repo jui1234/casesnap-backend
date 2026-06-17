@@ -108,6 +108,7 @@ function getModuleFeatureInfo(user, moduleName) {
     const caseAssignmentEnabled = subscriptionActive && isFeatureEnabled(user.organization, 'case_assignment');
 
     return {
+        canTemplate: excelImportExportEnabled,
         canImport: excelImportExportEnabled,
         canExport: excelImportExportEnabled,
         canBulkAssign: caseAssignmentEnabled

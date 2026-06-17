@@ -16,11 +16,35 @@ const {
 } = require('../utils/assigneeUtils');
 const { sendEncryptedJson } = require('../utils/responseEncryption');
 const { parseExcelFromBuffer, writeExcelToBuffer, toSafeString, toOptionalNumber, formatMongooseErrorForUser } = require('../utils/excelUtils');
+const { getExcelImportRowLimit } = require('../utils/subscriptionFeatureUtils');
+const { getOrganizationIdFromUser, getEffectiveSubscriptionSummaryForUser } = require('../utils/subscriptionContext');
 
 const canViewAllCases = (userRole) => canAssignModule(userRole, 'cases');
 const STAGE_CONFIRM_USER_SELECT = '_id firstName lastName email';
 
 const MAX_BULK_ASSIGN_CASES = 2000;
+
+function getRemainingLimitInfo(summary, limitKey, current) {
+    const max = summary?.subscriptionLimits?.[limitKey];
+    if (max === null || max === undefined) return null;
+    return {
+        max,
+        used: current,
+        remaining: Math.max(max - current, 0)
+    };
+}
+
+function buildRemainingImportLimitMessage(summary, label, limitInfo) {
+    const planLabel = summary?.subscriptionLabel || 'Current';
+    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s).`;
+}
+
+function buildImportCapacityError(summary, checks) {
+    const messages = checks
+        .filter(({ limitInfo, requested }) => limitInfo && requested > limitInfo.remaining)
+        .map(({ label, limitInfo }) => buildRemainingImportLimitMessage(summary, label, limitInfo));
+    return messages.length ? messages.join(' ') : null;
+}
 
 function normalizeCaseIdList(rawIds) {
     return [...new Set((rawIds || []).map((id) => String(id ?? '').trim()).filter(Boolean))];
@@ -1351,15 +1375,17 @@ exports.exportCasesToExcel = asyncHandler(async (req, res) => {
  * @access  Private (Requires 'create' permission on 'cases' module)
  */
 exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
-    const organizationId = req.user.organization;
+    const organizationId = getOrganizationIdFromUser(req.user);
     const userId = req.user._id;
+    const subscriptionSummary = await getEffectiveSubscriptionSummaryForUser(req.user);
+    const importRowLimit = getExcelImportRowLimit(subscriptionSummary?.subscriptionPlan);
 
     const file = req.file;
     if (!file || !file.buffer) {
         return next(new ErrorResponse('Excel file is required (form-data field: file)', 400));
     }
 
-    const parsed = parseCaseExcel(file.buffer, { sheetName: CASE_EXCEL_SHEET, maxRows: 5000 });
+    const parsed = parseCaseExcel(file.buffer, { sheetName: CASE_EXCEL_SHEET, maxRows: importRowLimit });
     if (!parsed.ok) return next(new ErrorResponse(parsed.error, 400));
 
     const canAssign = req.userRole && canAssignModule(req.userRole, 'cases');
@@ -1565,6 +1591,24 @@ exports.importCasesFromExcel = asyncHandler(async (req, res, next) => {
     let createdCases = 0;
     let createdClients = 0;
     try {
+        const [currentClientCount, currentCaseCount] = await Promise.all([
+            Client.countDocuments({ organization: organizationId, deletedAt: null }),
+            Case.countDocuments({ organization: organizationId, deletedAt: null })
+        ]);
+        const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
+        const caseLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxCases', currentCaseCount);
+
+        const limitMessages = [];
+        if (clientLimitInfo && pendingNewClients.length > clientLimitInfo.remaining) {
+            limitMessages.push(buildRemainingImportLimitMessage(subscriptionSummary, 'clients', clientLimitInfo));
+        }
+        if (caseLimitInfo && pendingNewCases.length > caseLimitInfo.remaining) {
+            limitMessages.push(buildRemainingImportLimitMessage(subscriptionSummary, 'cases', caseLimitInfo));
+        }
+        if (limitMessages.length) {
+            return next(new ErrorResponse(limitMessages.join(' '), 403));
+        }
+
         if (pendingNewClients.length) {
             await Client.insertMany(pendingNewClients, { ordered: true });
             createdClients = pendingNewClients.length;
@@ -1763,15 +1807,16 @@ exports.addCaseStage = asyncHandler(async (req, res, next) => {
  * @access  Private (Requires 'create' permission on 'cases' module)
  */
 exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
-    const organizationId = req.user.organization;
-    const userId = req.user._id;
+    const organizationId = getOrganizationIdFromUser(req.user);
+    const subscriptionSummary = await getEffectiveSubscriptionSummaryForUser(req.user);
+    const importRowLimit = getExcelImportRowLimit(subscriptionSummary?.subscriptionPlan);
 
     const file = req.file;
     if (!file || !file.buffer) {
         return next(new ErrorResponse('Excel file is required (form-data field: file)', 400));
     }
 
-    const parsed = parseCaseExcel(file.buffer, { sheetName: CASE_EXCEL_SHEET, maxRows: 5000 });
+    const parsed = parseCaseExcel(file.buffer, { sheetName: CASE_EXCEL_SHEET, maxRows: importRowLimit });
     if (!parsed.ok) return next(new ErrorResponse(parsed.error, 400));
 
     const canAssign = req.userRole && canAssignModule(req.userRole, 'cases');
@@ -1782,6 +1827,18 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
     const lookups = await loadCaseExcelImportLookups(organizationId, parsed.rows);
 
     const preview = [];
+    const [currentClientCount, currentCaseCount] = await Promise.all([
+        Client.countDocuments({ organization: organizationId, deletedAt: null }),
+        Case.countDocuments({ organization: organizationId, deletedAt: null })
+    ]);
+    const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
+    const caseLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxCases', currentCaseCount);
+    const earlyCapacityError = buildImportCapacityError(subscriptionSummary, [
+        { label: 'cases', limitInfo: caseLimitInfo, requested: groups.size }
+    ]);
+    if (earlyCapacityError) {
+        return next(new ErrorResponse(earlyCapacityError, 403));
+    }
 
     for (const [caseKey, rows] of groups.entries()) {
         const first = rows[0];
@@ -1864,6 +1921,12 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
 
                 if (!clientIssues.length) {
                     action = 'create_new';
+                    linkedClientId = `preview_client_${r}`;
+                    addCreatedClientToCaseExcelLookups(lookups, {
+                        _id: linkedClientId,
+                        phone: clientPhone,
+                        email: clientEmail || undefined
+                    });
                 }
 
                 clientPreviews.push({
@@ -1933,6 +1996,21 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
         });
     }
 
+    const validCases = preview.filter((p) => p.willCreate);
+    const requestedCases = validCases.length;
+    const requestedClients = validCases.reduce((sum, p) => {
+        return sum + (p.clients || []).filter((cp) => cp.action === 'create_new' && !(cp.issues || []).length).length;
+    }, 0);
+    const caseLimitExceeded = Boolean(caseLimitInfo && requestedCases > caseLimitInfo.remaining);
+    const clientLimitExceeded = Boolean(clientLimitInfo && requestedClients > clientLimitInfo.remaining);
+    const capacityError = buildImportCapacityError(subscriptionSummary, [
+        { label: 'cases', limitInfo: caseLimitInfo, requested: requestedCases },
+        { label: 'clients', limitInfo: clientLimitInfo, requested: requestedClients }
+    ]);
+    if (capacityError) {
+        return next(new ErrorResponse(capacityError, 403));
+    }
+
     res.status(200).json({
         success: true,
         message: 'Case Excel preview generated',
@@ -1940,8 +2018,28 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
             cases: preview,
             totals: {
                 totalCases: preview.length,
-                validCases: preview.filter((p) => p.willCreate).length,
+                validCases: requestedCases,
                 invalidCases: preview.filter((p) => !p.willCreate).length
+            },
+            subscriptionLimit: {
+                cases: caseLimitInfo ? {
+                    limitKey: 'maxCases',
+                    max: caseLimitInfo.max,
+                    used: caseLimitInfo.used,
+                    remaining: caseLimitInfo.remaining,
+                    requested: requestedCases,
+                    canImport: !caseLimitExceeded,
+                    message: caseLimitExceeded ? buildRemainingImportLimitMessage(subscriptionSummary, 'cases', caseLimitInfo) : null
+                } : null,
+                clients: clientLimitInfo ? {
+                    limitKey: 'maxClients',
+                    max: clientLimitInfo.max,
+                    used: clientLimitInfo.used,
+                    remaining: clientLimitInfo.remaining,
+                    requested: requestedClients,
+                    canImport: !clientLimitExceeded,
+                    message: clientLimitExceeded ? buildRemainingImportLimitMessage(subscriptionSummary, 'clients', clientLimitInfo) : null
+                } : null
             },
             errors
         }
