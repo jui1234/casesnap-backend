@@ -36,7 +36,14 @@ function getRemainingLimitInfo(summary, limitKey, current) {
 
 function buildRemainingImportLimitMessage(summary, label, limitInfo) {
     const planLabel = summary?.subscriptionLabel || 'Current';
-    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s). Please import only ${limitInfo.remaining} ${label}.`;
+    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s).`;
+}
+
+function buildImportCapacityError(summary, checks) {
+    const messages = checks
+        .filter(({ limitInfo, requested }) => limitInfo && requested > limitInfo.remaining)
+        .map(({ label, limitInfo }) => buildRemainingImportLimitMessage(summary, label, limitInfo));
+    return messages.length ? messages.join(' ') : null;
 }
 
 function normalizeCaseIdList(rawIds) {
@@ -1826,6 +1833,12 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
     ]);
     const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
     const caseLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxCases', currentCaseCount);
+    const earlyCapacityError = buildImportCapacityError(subscriptionSummary, [
+        { label: 'cases', limitInfo: caseLimitInfo, requested: groups.size }
+    ]);
+    if (earlyCapacityError) {
+        return next(new ErrorResponse(earlyCapacityError, 403));
+    }
 
     for (const [caseKey, rows] of groups.entries()) {
         const first = rows[0];
@@ -1990,11 +2003,12 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
     }, 0);
     const caseLimitExceeded = Boolean(caseLimitInfo && requestedCases > caseLimitInfo.remaining);
     const clientLimitExceeded = Boolean(clientLimitInfo && requestedClients > clientLimitInfo.remaining);
-    if (caseLimitExceeded) {
-        errors.push({ row: null, errors: [buildRemainingImportLimitMessage(subscriptionSummary, 'cases', caseLimitInfo)] });
-    }
-    if (clientLimitExceeded) {
-        errors.push({ row: null, errors: [buildRemainingImportLimitMessage(subscriptionSummary, 'clients', clientLimitInfo)] });
+    const capacityError = buildImportCapacityError(subscriptionSummary, [
+        { label: 'cases', limitInfo: caseLimitInfo, requested: requestedCases },
+        { label: 'clients', limitInfo: clientLimitInfo, requested: requestedClients }
+    ]);
+    if (capacityError) {
+        return next(new ErrorResponse(capacityError, 403));
     }
 
     res.status(200).json({

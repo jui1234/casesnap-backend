@@ -82,7 +82,12 @@ function getRemainingLimitInfo(summary, limitKey, current) {
 
 function buildRemainingImportLimitMessage(summary, label, limitInfo) {
     const planLabel = summary?.subscriptionLabel || 'Current';
-    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s). Please import only ${limitInfo.remaining} ${label}.`;
+    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s).`;
+}
+
+function assertClientImportCapacity(summary, limitInfo, requestedClients) {
+    if (!limitInfo || requestedClients <= limitInfo.remaining) return null;
+    return buildRemainingImportLimitMessage(summary, 'clients', limitInfo);
 }
 
 /**
@@ -980,6 +985,10 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
     const pendingClients = [];
     const currentClientCount = await Client.countDocuments({ organization: organizationId, deletedAt: null });
     const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
+    const capacityError = assertClientImportCapacity(subscriptionSummary, clientLimitInfo, parsed.rows.length);
+    if (capacityError) {
+        return next(new ErrorResponse(capacityError, 403));
+    }
 
     for (const row of parsed.rows) {
         const r = row.rowNumber;
@@ -1152,6 +1161,10 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
     const errors = [];
     const currentClientCount = await Client.countDocuments({ organization: organizationId, deletedAt: null });
     const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
+    const capacityError = assertClientImportCapacity(subscriptionSummary, clientLimitInfo, parsed.rows.length);
+    if (capacityError) {
+        return next(new ErrorResponse(capacityError, 403));
+    }
 
     for (const row of parsed.rows) {
         const r = row.rowNumber;
