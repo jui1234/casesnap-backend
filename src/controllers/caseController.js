@@ -1869,8 +1869,9 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
             toSafeString(rr.data.clientFirstName) ||
             toSafeString(rr.data.clientLastName)
         );
+        const clientPermissionIssue = 'Only users with case assignee permission can link/create clients during import';
         if (!canAssign && anyClientFields) {
-            caseIssues.push('Only users with case assignee permission can link/create clients during import');
+            caseIssues.push(clientPermissionIssue);
         }
 
         if (caseNumber && lookups.existingCaseNumbers.has(caseNumber)) {
@@ -1885,6 +1886,29 @@ exports.previewCasesExcelImport = asyncHandler(async (req, res, next) => {
         for (const rr of rows) {
             const r = rr.rowNumber;
             const d = rr.data;
+            const rowHasClientFields = !!(
+                toSafeString(d.clientId) ||
+                toSafeString(d.clientPhone) ||
+                toSafeString(d.clientEmail) ||
+                toSafeString(d.clientFirstName) ||
+                toSafeString(d.clientLastName)
+            );
+
+            if (!canAssign && rowHasClientFields) {
+                clientPreviews.push({
+                    row: r,
+                    action: 'none',
+                    issues: [clientPermissionIssue],
+                    match: { clientId: null },
+                    data: {
+                        clientPhone: toSafeString(d.clientPhone).replace(/\D/g, '') || '',
+                        clientEmail: toSafeString(d.clientEmail).toLowerCase() || '',
+                        clientFirstName: toSafeString(d.clientFirstName) || '',
+                        clientLastName: toSafeString(d.clientLastName) || ''
+                    }
+                });
+                continue;
+            }
 
             const {
                 clientPhone,

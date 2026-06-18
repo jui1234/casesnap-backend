@@ -57,7 +57,11 @@ exports.getAssigneePermissionsForRole = (role) => {
 exports.canAssignModule = (userRole, moduleName) => {
     if (!userRole) return false;
     if (isSuperAdminRole(userRole)) return true;
-    return userRole.hasPermission ? userRole.hasPermission(moduleName, 'assignee') : false;
+    if (userRole.hasPermission) return userRole.hasPermission(moduleName, 'assignee');
+    if (!Array.isArray(userRole.permissions)) return false;
+    return userRole.permissions.some(
+        (p) => p.module === moduleName && (p.actions || []).includes('assignee')
+    );
 };
 
 /**

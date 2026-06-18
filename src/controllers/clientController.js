@@ -69,6 +69,11 @@ const CLIENT_EXCEL_HEADERS = [
     'status',
     'notes'
 ];
+const CLIENT_EMAIL_REGEX = /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/;
+
+function isValidClientEmail(email) {
+    return CLIENT_EMAIL_REGEX.test(String(email || '').trim());
+}
 
 function getRemainingLimitInfo(summary, limitKey, current) {
     const max = summary?.subscriptionLimits?.[limitKey];
@@ -1019,6 +1024,7 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
         const rowIssues = [];
         if (!firstName) rowIssues.push('firstName is required');
         if (!lastName) rowIssues.push('lastName is required');
+        if (email && !isValidClientEmail(email)) rowIssues.push('email must be a valid email address');
         if (!phone) rowIssues.push('phone is required');
         if (phone && phone.length !== 10) rowIssues.push('phone must be a 10-digit number');
         if (alternatePhone && alternatePhone.length !== 10) rowIssues.push('alternatePhone must be a 10-digit number');
@@ -1037,7 +1043,7 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
             continue;
         }
 
-        if (email) {
+        if (email && isValidClientEmail(email)) {
             const existingClient = await Client.findOne({
                 organization: organizationId,
                 email,
@@ -1195,6 +1201,7 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
         const rowIssues = [];
         if (!firstName) rowIssues.push('firstName is required');
         if (!lastName) rowIssues.push('lastName is required');
+        if (email && !isValidClientEmail(email)) rowIssues.push('email must be a valid email address');
         if (!phone) rowIssues.push('phone is required');
         if (phone && phone.length !== 10) rowIssues.push('phone must be a 10-digit number');
         if (alternatePhone && alternatePhone.length !== 10) rowIssues.push('alternatePhone must be a 10-digit number');
@@ -1209,7 +1216,7 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
 
         let willCreate = true;
         let duplicateReason = null;
-        if (email) {
+        if (email && isValidClientEmail(email)) {
             const existingClient = await Client.findOne({
                 organization: organizationId,
                 email,
