@@ -69,6 +69,11 @@ const CLIENT_EXCEL_HEADERS = [
     'status',
     'notes'
 ];
+const CLIENT_EMAIL_REGEX = /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/;
+
+function isValidClientEmail(email) {
+    return CLIENT_EMAIL_REGEX.test(String(email || '').trim());
+}
 
 function getRemainingLimitInfo(summary, limitKey, current) {
     const max = summary?.subscriptionLimits?.[limitKey];
@@ -82,7 +87,12 @@ function getRemainingLimitInfo(summary, limitKey, current) {
 
 function buildRemainingImportLimitMessage(summary, label, limitInfo) {
     const planLabel = summary?.subscriptionLabel || 'Current';
-    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s). Please import only ${limitInfo.remaining} ${label}.`;
+    return `${planLabel} plan allows only ${limitInfo.max} ${label}. You have ${limitInfo.remaining} remaining ${label.slice(0, -1)} slot(s).`;
+}
+
+function assertClientImportCapacity(summary, limitInfo, requestedClients) {
+    if (!limitInfo || requestedClients <= limitInfo.remaining) return null;
+    return buildRemainingImportLimitMessage(summary, 'clients', limitInfo);
 }
 
 /**
@@ -980,6 +990,10 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
     const pendingClients = [];
     const currentClientCount = await Client.countDocuments({ organization: organizationId, deletedAt: null });
     const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
+    const capacityError = assertClientImportCapacity(subscriptionSummary, clientLimitInfo, parsed.rows.length);
+    if (capacityError) {
+        return next(new ErrorResponse(capacityError, 403));
+    }
 
     for (const row of parsed.rows) {
         const r = row.rowNumber;
@@ -1010,6 +1024,7 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
         const rowIssues = [];
         if (!firstName) rowIssues.push('firstName is required');
         if (!lastName) rowIssues.push('lastName is required');
+        if (email && !isValidClientEmail(email)) rowIssues.push('email must be a valid email address');
         if (!phone) rowIssues.push('phone is required');
         if (phone && phone.length !== 10) rowIssues.push('phone must be a 10-digit number');
         if (alternatePhone && alternatePhone.length !== 10) rowIssues.push('alternatePhone must be a 10-digit number');
@@ -1028,7 +1043,7 @@ exports.importClientsFromExcel = asyncHandler(async (req, res, next) => {
             continue;
         }
 
-        if (email) {
+        if (email && isValidClientEmail(email)) {
             const existingClient = await Client.findOne({
                 organization: organizationId,
                 email,
@@ -1152,6 +1167,10 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
     const errors = [];
     const currentClientCount = await Client.countDocuments({ organization: organizationId, deletedAt: null });
     const clientLimitInfo = getRemainingLimitInfo(subscriptionSummary, 'maxClients', currentClientCount);
+    const capacityError = assertClientImportCapacity(subscriptionSummary, clientLimitInfo, parsed.rows.length);
+    if (capacityError) {
+        return next(new ErrorResponse(capacityError, 403));
+    }
 
     for (const row of parsed.rows) {
         const r = row.rowNumber;
@@ -1182,6 +1201,7 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
         const rowIssues = [];
         if (!firstName) rowIssues.push('firstName is required');
         if (!lastName) rowIssues.push('lastName is required');
+        if (email && !isValidClientEmail(email)) rowIssues.push('email must be a valid email address');
         if (!phone) rowIssues.push('phone is required');
         if (phone && phone.length !== 10) rowIssues.push('phone must be a 10-digit number');
         if (alternatePhone && alternatePhone.length !== 10) rowIssues.push('alternatePhone must be a 10-digit number');
@@ -1196,7 +1216,7 @@ exports.previewClientsExcelImport = asyncHandler(async (req, res, next) => {
 
         let willCreate = true;
         let duplicateReason = null;
-        if (email) {
+        if (email && isValidClientEmail(email)) {
             const existingClient = await Client.findOne({
                 organization: organizationId,
                 email,
