@@ -46,7 +46,8 @@ const allowedOrigins = [
     'https://casesnap-nvewn0k03-jui1234s-projects.vercel.app',  // Old Vercel URL
     'https://casesnap-nvewn0k03-jui1234s-projects.vercel.app/',  // Old Vercel URL with slash
     'https://casesnap-lake.vercel.app',  // New Vercel URL
-    'https://casesnap-lake.vercel.app/'  // New Vercel URL with slash
+    'https://casesnap-lake.vercel.app/' , // New Vercel URL with slash
+    'https://casesnap-trivinyatec.vercel.app',  // New Vercel URL
 ];
 
 // Add environment variable origins if they exist
