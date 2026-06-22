@@ -3,12 +3,27 @@
 
 const nodemailer = require('nodemailer');
 
+const createGmailTransporter = (email, password) => {
+    return nodemailer.createTransport({
+        host: process.env.SMTP_HOST || process.env.GMAIL_SMTP_HOST || 'smtp.gmail.com',
+        port: Number(process.env.SMTP_PORT || process.env.GMAIL_SMTP_PORT || 587),
+        secure: String(process.env.SMTP_SECURE || process.env.GMAIL_SMTP_SECURE || 'false') === 'true',
+        auth: {
+            user: email,
+            pass: password
+        },
+        connectionTimeout: Number(process.env.GMAIL_CONNECTION_TIMEOUT || 30000),
+        greetingTimeout: Number(process.env.GMAIL_GREETING_TIMEOUT || 30000),
+        socketTimeout: Number(process.env.GMAIL_SOCKET_TIMEOUT || 30000)
+    });
+};
+
 // Initialize Gmail transporter
 const initializeEmailService = () => {
     try {
         // Check if Gmail credentials are configured
-        const email = process.env.GMAIL_EMAIL || process.env.GMAIL_USER;
-        const password = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
+        const email = process.env.SMTP_USER || process.env.GMAIL_EMAIL || process.env.GMAIL_USER;
+        const password = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
 
         if (!email || !password) {
             console.log('⚠️ Gmail credentials not found in environment variables');
@@ -18,13 +33,7 @@ const initializeEmailService = () => {
         }
 
         // Create transporter
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: {
-                user: email,
-                pass: password
-            }
-        });
+        const transporter = createGmailTransporter(email, password);
 
         console.log('✅ Gmail SMTP service initialized');
         console.log('📧 Sender email:', email);
@@ -40,8 +49,8 @@ const sendEmployeeInvitation = async (emailData) => {
     const { to, firstName, lastName, organizationName, companyEmail, adminName, invitationLink } = emailData;
 
     // Get Gmail credentials
-    const fromEmail = process.env.GMAIL_EMAIL || process.env.GMAIL_USER || 'casesnap2025@gmail.com';
-    const password = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
+    const fromEmail = process.env.SMTP_USER || process.env.GMAIL_EMAIL || process.env.GMAIL_USER || 'casesnap2025@gmail.com';
+    const password = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
 
     // Check if Gmail is configured
     if (!fromEmail || !password) {
@@ -63,13 +72,7 @@ const sendEmployeeInvitation = async (emailData) => {
     // Create transporter
     let transporter;
     try {
-        transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: {
-                user: fromEmail,
-                pass: password
-            }
-        });
+        transporter = createGmailTransporter(fromEmail, password);
     } catch (error) {
         console.error('❌ Failed to create Gmail transporter:', error.message);
         return { 
@@ -215,8 +218,8 @@ The ${organizationName} Team
 
 // Test email configuration
 const testEmailConnection = async () => {
-    const email = process.env.GMAIL_EMAIL || process.env.GMAIL_USER;
-    const password = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
+    const email = process.env.SMTP_USER || process.env.GMAIL_EMAIL || process.env.GMAIL_USER;
+    const password = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
 
     if (!email || !password) {
         console.log('⚠️ Gmail credentials not configured');
@@ -224,13 +227,7 @@ const testEmailConnection = async () => {
     }
 
     try {
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: {
-                user: email,
-                pass: password
-            }
-        });
+        const transporter = createGmailTransporter(email, password);
 
         // Verify connection
         await transporter.verify();
@@ -247,8 +244,8 @@ const sendUserInvitation = async (emailData) => {
     const { to, firstName, lastName, organizationName, companyEmail, adminName, roleName, invitationLink } = emailData;
 
     // Get Gmail credentials
-    const fromEmail = process.env.GMAIL_EMAIL || process.env.GMAIL_USER || 'casesnap2025@gmail.com';
-    const password = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
+    const fromEmail = process.env.SMTP_USER || process.env.GMAIL_EMAIL || process.env.GMAIL_USER || 'casesnap2025@gmail.com';
+    const password = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
 
     // Check if Gmail is configured
     if (!fromEmail || !password) {
@@ -270,13 +267,7 @@ const sendUserInvitation = async (emailData) => {
     // Create transporter
     let transporter;
     try {
-        transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: {
-                user: fromEmail,
-                pass: password
-            }
-        });
+        transporter = createGmailTransporter(fromEmail, password);
     } catch (error) {
         console.error('❌ Failed to create Gmail transporter:', error.message);
         return { 
@@ -422,8 +413,8 @@ The ${organizationName} Team
 
 // Send password reset email
 const sendPasswordResetEmail = async ({ to, fullName, resetLink, organizationName = 'CaseSnap' }) => {
-    const fromEmail = process.env.GMAIL_EMAIL || process.env.GMAIL_USER || 'casesnap2025@gmail.com';
-    const password = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
+    const fromEmail = process.env.SMTP_USER || process.env.GMAIL_EMAIL || process.env.GMAIL_USER || 'casesnap2025@gmail.com';
+    const password = process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD;
 
     if (!fromEmail || !password) {
         return {
@@ -435,13 +426,7 @@ const sendPasswordResetEmail = async ({ to, fullName, resetLink, organizationNam
 
     let transporter;
     try {
-        transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: {
-                user: fromEmail,
-                pass: password
-            }
-        });
+        transporter = createGmailTransporter(fromEmail, password);
     } catch (error) {
         return {
             success: false,
