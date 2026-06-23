@@ -1,80 +1,64 @@
 // test-email-config.js
-// Script to test email configuration
+// Script to test Brevo email configuration.
 
 require('dotenv').config();
-const { initializeEmailService, testEmailConnection, sendEmployeeInvitation } = require('./src/utils/emailService');
+const { initializeEmailService, testEmailConnection, sendEmployeeInvitation } = require('./src/services/emailService');
 
 async function testEmailConfig() {
-    console.log('🧪 Testing Email Configuration...\n');
-    
-    // Test 1: Check environment variables
-    console.log('📋 Step 1: Checking Environment Variables');
-    console.log('   SENDGRID_API_KEY:', process.env.SENDGRID_API_KEY ? '✅ Found' : '❌ Missing');
-    console.log('   SENDGRID_FROM_EMAIL:', process.env.SENDGRID_FROM_EMAIL || '⚠️ Not set (will use default)');
-    console.log('   SMTP_FROM:', process.env.SMTP_FROM || '⚠️ Not set');
+    console.log('Testing Email Configuration...\n');
+
+    console.log('Step 1: Checking environment variables');
+    console.log('   BREVO_API_KEY:', process.env.BREVO_API_KEY ? 'Found' : 'Missing');
+    console.log('   BREVO_SENDER_EMAIL:', process.env.BREVO_SENDER_EMAIL || 'Missing');
+    console.log('   BREVO_SENDER_NAME:', process.env.BREVO_SENDER_NAME || 'CaseSnap');
     console.log('');
-    
-    // Test 2: Initialize email service
-    console.log('📋 Step 2: Initializing Email Service');
+
+    console.log('Step 2: Initializing email service');
     const initialized = initializeEmailService();
-    console.log('   Result:', initialized ? '✅ Initialized' : '❌ Failed to initialize');
+    console.log('   Result:', initialized ? 'Initialized' : 'Failed to initialize');
     console.log('');
-    
-    // Test 3: Test connection
-    console.log('📋 Step 3: Testing Email Connection');
+
+    console.log('Step 3: Testing email configuration');
     const connectionTest = await testEmailConnection();
-    console.log('   Result:', connectionTest.success ? '✅ Connected' : '❌ Failed');
+    console.log('   Result:', connectionTest.success ? 'Configured' : 'Failed');
     if (!connectionTest.success) {
         console.log('   Error:', connectionTest.message || connectionTest.error);
     }
     console.log('');
-    
-    // Test 4: Try sending a test email (if configured)
-    if (process.env.SENDGRID_API_KEY && process.env.TEST_EMAIL) {
-        console.log('📋 Step 4: Sending Test Email');
+
+    if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER_EMAIL && process.env.TEST_EMAIL) {
+        console.log('Step 4: Sending test email');
         console.log('   To:', process.env.TEST_EMAIL);
-        
+
         const testEmailResult = await sendEmployeeInvitation({
             to: process.env.TEST_EMAIL,
             firstName: 'Test',
             lastName: 'User',
             organizationName: 'Test Organization',
-            companyEmail: 'test@example.com',
+            companyEmail: process.env.BREVO_SENDER_EMAIL,
             adminName: 'Test Admin',
             invitationLink: 'https://example.com/test-link'
         });
-        
+
         if (testEmailResult.success) {
-            console.log('   ✅ Test email sent successfully!');
-            console.log('   Message ID:', testEmailResult.messageId);
+            console.log('   Test email sent successfully');
+            console.log('   Message ID:', testEmailResult.messageId || 'not returned');
         } else {
-            console.log('   ❌ Test email failed!');
+            console.log('   Test email failed');
             console.log('   Error:', testEmailResult.error || testEmailResult.message);
-            if (testEmailResult.details) {
-                console.log('   Details:', JSON.stringify(testEmailResult.details, null, 2));
-            }
         }
     } else {
-        console.log('📋 Step 4: Skipping Test Email');
-        if (!process.env.SENDGRID_API_KEY) {
-            console.log('   ⚠️ SENDGRID_API_KEY not set');
-        }
-        if (!process.env.TEST_EMAIL) {
-            console.log('   ⚠️ TEST_EMAIL not set (set it in .env to test sending)');
-        }
+        console.log('Step 4: Skipping test email');
+        console.log('   Set BREVO_API_KEY, BREVO_SENDER_EMAIL, and TEST_EMAIL to send a test message.');
     }
-    
-    console.log('\n📝 Summary:');
-    if (!process.env.SENDGRID_API_KEY) {
-        console.log('❌ SENDGRID_API_KEY is missing!');
-        console.log('   → Add SENDGRID_API_KEY=your_key to your .env file');
-        console.log('   → See EMAIL_SETUP_GUIDE.md for instructions');
+
+    console.log('\nSummary:');
+    if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) {
+        console.log('Brevo email service is missing required environment variables.');
     } else if (!initialized) {
-        console.log('❌ Email service failed to initialize');
-        console.log('   → Check that your API key is valid');
+        console.log('Email service failed to initialize.');
     } else {
-        console.log('✅ Email service is configured correctly!');
-        console.log('   → Check server logs when sending invitations');
+        console.log('Email service is configured for Brevo.');
     }
 }
 

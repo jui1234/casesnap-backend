@@ -10,7 +10,7 @@ const { getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
 const { getEffectivePermissionsForRole } = require('../utils/roleUtils');
 const { validateOrganizationSubscription } = require('../utils/subscriptionUtils');
 const { getSubscriptionSummary } = require('../utils/subscriptionFeatureUtils');
-const { sendPasswordResetEmail } = require('../utils/gmailService');
+const { sendPasswordResetEmail } = require('../services/emailService');
 
 // @desc      Login user (Admin or Employee)
 // @route     POST /api/auth/login
