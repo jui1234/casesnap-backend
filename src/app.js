@@ -1,4 +1,8 @@
-require('dotenv').config(); // Load environment variables from .env file
+const path = require('path');
+
+require('dotenv').config({
+    path: path.resolve(__dirname, '../.env')
+}); // Load environment variables from the backend .env file
 
 const express = require('express');
 const mongoose = require('mongoose');
@@ -17,8 +21,7 @@ const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const exampleRoutes = require('./routes/exampleRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const errorHandler = require('./middleware/error');
-const path = require('path');
-const { initializeEmailService } = require('./utils/gmailService');
+const { initializeEmailService } = require('./services/emailService');
 const { startCaseStageReminderJob } = require('./utils/caseStageReminderJob');
 const { initializeSubscriptionPlans } = require('./utils/initializeSubscriptionPlans');
 
