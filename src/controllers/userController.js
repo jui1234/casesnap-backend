@@ -6,7 +6,7 @@ const Organization = require('../models/Organization');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
 const crypto = require('crypto');
-const { sendUserInvitation } = require('../utils/gmailService');
+const { sendUserInvitation } = require('../services/emailService');
 const { roleHasAssigneePermission, checkAssigneeLimit, getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
 const { PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE } = require('../middleware/subscriptionLimits');
 
@@ -229,7 +229,7 @@ exports.sendUserInvitation = asyncHandler(async (req, res, next) => {
     console.log('🔑 Invitation token:', invitationToken);
     console.log('📧 User email:', email);
 
-    // Send email with invitation link using Gmail SMTP
+    // Send email with invitation link using Brevo Transactional Email API
     const emailResult = await sendUserInvitation({
         to: email,
         firstName,

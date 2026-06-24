@@ -5,7 +5,7 @@ const Organization = require('../models/Organization');
 const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
 const crypto = require('crypto');
-const { sendEmployeeInvitation } = require('../utils/gmailService');
+const { sendEmployeeInvitation } = require('../services/emailService');
 const jwt = require('jsonwebtoken');
 
 // @desc      Send employee invitation
@@ -201,7 +201,7 @@ exports.sendEmployeeInvitation = asyncHandler(async (req, res, next) => {
     console.log('🔑 Invitation token:', invitationToken);
     console.log('📧 Employee email:', email);
 
-    // Send email with invitation link using Gmail SMTP
+    // Send email with invitation link using Brevo Transactional Email API
     const emailResult = await sendEmployeeInvitation({
         to: email,
         firstName,
@@ -213,23 +213,15 @@ exports.sendEmployeeInvitation = asyncHandler(async (req, res, next) => {
     });
 
     if (emailResult.success) {
-        console.log('✅ Email sent successfully via Gmail SMTP');
+        console.log('Email sent successfully via Brevo');
     } else {
         console.error('❌ Email sending failed!');
         console.error('   Error:', emailResult.message || emailResult.error);
         console.error('   Error Code:', emailResult.errorCode || emailResult.error || 'UNKNOWN');
         
         // Provide user-friendly error message based on error code
-        if (emailResult.errorCode === 'GMAIL_NOT_CONFIGURED') {
-            console.error('   ⚠️ Gmail credentials not configured.');
-            console.error('   → Add GMAIL_EMAIL=your_email@gmail.com to .env file');
-            console.error('   → Add GMAIL_APP_PASSWORD=your_app_password to .env file');
-            console.error('   → Get App Password: https://myaccount.google.com/apppasswords');
-        } else if (emailResult.errorCode === 'GMAIL_ERROR') {
-            console.error('   ⚠️ Gmail sending error.');
-            console.error('   → Check your Gmail App Password is correct');
-            console.error('   → Make sure 2-Step Verification is enabled');
-            console.error('   → Verify daily sending limit (500 emails/day for free accounts)');
+        if (emailResult.errorCode === 'BREVO_EMAIL_ERROR') {
+            console.error('   Brevo sending error. Check BREVO_API_KEY and BREVO_SENDER_EMAIL on Render.');
         }
         
         // Still return success to user, but log the error

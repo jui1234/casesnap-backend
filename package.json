@@ -14,7 +14,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@sendgrid/mail": "^8.1.6",
+    "@getbrevo/brevo": "^5.0.4",
     "bcryptjs": "^3.0.2",
     "cloudinary": "^2.5.1",
     "cookie-parser": "^1.4.7",
@@ -24,7 +24,6 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
     "multer": "^2.0.2",
-    "nodemailer": "^6.9.7",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
