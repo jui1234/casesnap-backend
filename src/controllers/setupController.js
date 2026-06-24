@@ -13,6 +13,10 @@ const { getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
 const { initializeDefaultModules } = require('../utils/initializeModules');
 const { getEffectivePermissionsForRole } = require('../utils/roleUtils');
 const { normalizePlanName } = require('../utils/subscriptionFeatureUtils');
+const {
+    sendCompanyWelcomeEmail,
+    sendSuperAdminWelcomeEmail
+} = require('../services/emailService');
 
 function resolveOrganizationId(user) {
     if (!user || user.organization == null) return null;
@@ -273,7 +277,44 @@ exports.initializeSetup = asyncHandler(async (req, res, next) => {
     console.log('✅ Organization updated with super admin reference');
 
     // -----------------------------------------------------------
-    // 8. Generate and Send JWT Token
+    // 8. Send Welcome Emails
+    // -----------------------------------------------------------
+    console.log('📧 Sending setup welcome emails...');
+    const adminFullName = `${superAdminUser.firstName} ${superAdminUser.lastName}`.trim();
+    const welcomeEmailResults = await Promise.allSettled([
+        sendCompanyWelcomeEmail({
+            to: organization.companyEmail,
+            organizationName: organization.companyName,
+            adminName: adminFullName,
+            subscriptionPlan: organization.subscriptionPlan
+        }),
+        sendSuperAdminWelcomeEmail({
+            to: superAdminUser.email,
+            organizationName: organization.companyName,
+            adminName: adminFullName,
+            companyEmail: organization.companyEmail,
+            subscriptionPlan: organization.subscriptionPlan
+        })
+    ]);
+
+    welcomeEmailResults.forEach((result, index) => {
+        const recipientType = index === 0 ? 'company' : 'super admin';
+
+        if (result.status === 'rejected') {
+            console.error(`❌ Failed to send ${recipientType} welcome email:`, result.reason);
+            return;
+        }
+
+        if (!result.value?.success) {
+            console.error(`❌ Failed to send ${recipientType} welcome email:`, result.value?.error || result.value?.message);
+            return;
+        }
+
+        console.log(`✅ ${recipientType} welcome email sent successfully`);
+    });
+
+    // -----------------------------------------------------------
+    // 9. Generate and Send JWT Token
     // -----------------------------------------------------------
     console.log('🔐 Generating JWT token...');
     const token = superAdminUser.getSignedJwtToken(); // We'll add this method to the User model
