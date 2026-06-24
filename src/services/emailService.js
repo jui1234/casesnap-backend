@@ -7,6 +7,13 @@ require('dotenv').config({
 
 const getErrorDetails = (error) => error.body || error.response?.body || error.message || error;
 
+const escapeHtml = (value = '') => String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 const sendEmail = async ({ to, subject, html, text }) => {
     try {
         if (!process.env.BREVO_API_KEY) {
@@ -141,6 +148,110 @@ const sendPasswordResetEmail = async ({ to, fullName, resetLink, organizationNam
     text: `Hello ${fullName || 'User'},\n\nWe received a request to reset your password.\nReset link: ${resetLink}\n\nThis link expires in 15 minutes.\nIf you did not request this, please ignore this email.`
 });
 
+const buildSetupWelcomeTemplate = ({
+    eyebrow,
+    title,
+    intro,
+    highlights,
+    footerNote,
+    organizationName,
+    adminName,
+    greeting,
+    setupDetails = [],
+    loginEmail
+}) => {
+    const safeOrganizationName = escapeHtml(organizationName || 'your organization');
+    const safeAdminName = escapeHtml(adminName || 'Super Admin');
+    const safeGreeting = escapeHtml(greeting || `Hello ${adminName || 'Super Admin'}`);
+    const safeLoginEmail = escapeHtml(loginEmail || '');
+
+    const highlightItems = highlights
+        .map((item) => `<li style="margin: 0 0 10px 0;">${escapeHtml(item)}</li>`)
+        .join('');
+    const setupDetailItems = setupDetails
+        .map(({ label, value }) => `<p style="margin: 4px 0 0 0;">${escapeHtml(label)}: <strong>${escapeHtml(value)}</strong></p>`)
+        .join('');
+
+    return {
+        html: `
+            <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 16px; line-height: 1.6; background-color: #f8fafc; color: #0f172a; padding: 24px;">
+              <div style="max-width: 640px; margin: auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
+                <div style="background-color: #111827; color: #ffffff; padding: 28px 36px;">
+                  <p style="margin: 0 0 6px 0; color: #facc15; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;">${escapeHtml(eyebrow)}</p>
+                  <h1 style="margin: 0; font-size: 28px; line-height: 1.25;">${escapeHtml(title)}</h1>
+                </div>
+                <div style="padding: 34px 36px;">
+                  <p style="margin-top: 0;"><strong>${safeGreeting}</strong>,</p>
+                  <p>${escapeHtml(intro)}</p>
+                  <div style="background-color: #fff7d6; border: 1px solid #fde68a; border-radius: 10px; padding: 18px 20px; margin: 26px 0;">
+                    <p style="margin: 0 0 8px 0; font-weight: 700;">Setup details</p>
+                    <p style="margin: 0;">Organization: <strong>${safeOrganizationName}</strong></p>
+                    ${setupDetailItems}
+                    ${safeLoginEmail ? `<p style="margin: 4px 0 0 0;">Login email: <strong>${safeLoginEmail}</strong></p>` : ''}
+                  </div>
+                  <p style="margin-bottom: 10px; font-weight: 700;">What's ready now</p>
+                  <ul style="padding-left: 20px; margin-top: 0;">${highlightItems}</ul>
+                  <p>${escapeHtml(footerNote)}</p>
+                  <p style="margin-bottom: 0;">Best regards,<br /><strong>Team CaseSnap</strong></p>
+                </div>
+              </div>
+            </div>
+        `,
+        text: `${greeting || `Hello ${adminName || 'Super Admin'}`},\n\n${intro}\n\nSetup details:\nOrganization: ${organizationName || 'your organization'}${setupDetails.length ? `\n${setupDetails.map(({ label, value }) => `${label}: ${value}`).join('\n')}` : ''}${loginEmail ? `\nLogin email: ${loginEmail}` : ''}\n\nWhat's ready now:\n- ${highlights.join('\n- ')}\n\n${footerNote}\n\nBest regards,\nTeam CaseSnap`
+    };
+};
+
+const sendCompanyWelcomeEmail = async ({ to, organizationName, adminName, subscriptionPlan }) => {
+    const template = buildSetupWelcomeTemplate({
+        eyebrow: 'Organization setup complete',
+        title: `${organizationName || 'Your organization'} is now on CaseSnap`,
+        greeting: `Hello ${organizationName || 'Team'} Team`,
+        intro: `Your organization workspace has been created successfully in CaseSnap. CaseSnap is now ready for your team to manage clients, cases, roles, and daily legal operations from one place.`,
+        highlights: [
+            `${adminName || 'The account owner'} has been assigned as the SUPER_ADMIN for this workspace.`,
+            `The current subscription plan is ${subscriptionPlan || 'free'}.`,
+            'Your team can begin onboarding users, adding clients, and creating cases.'
+        ],
+        footerNote: 'This is your organization confirmation email for the completed CaseSnap setup.',
+        organizationName,
+        adminName,
+        setupDetails: [
+            { label: 'Super admin', value: adminName || 'SUPER_ADMIN' },
+            { label: 'Plan', value: subscriptionPlan || 'free' }
+        ]
+    });
+
+    return sendEmail({
+        to,
+        subject: `${organizationName} workspace setup is complete`,
+        ...template
+    });
+};
+
+const sendSuperAdminWelcomeEmail = async ({ to, organizationName, adminName, companyEmail, subscriptionPlan }) => {
+    const template = buildSetupWelcomeTemplate({
+        eyebrow: 'Super admin access ready',
+        title: 'Your CaseSnap super admin account is ready',
+        greeting: `Hello ${adminName || 'Super Admin'}`,
+        intro: `Your super admin account for ${organizationName || 'your organization'} has been created and approved. You now have full access to configure roles, manage users, and run the workspace.`,
+        highlights: [
+            'Your SUPER_ADMIN role has full permissions across active modules.',
+            `The organization contact email is ${companyEmail || 'configured in your workspace'}.`,
+            `The workspace is currently on the ${subscriptionPlan || 'free'} plan.`
+        ],
+        footerNote: 'For security, keep your login details private and invite team members from inside CaseSnap when you are ready.',
+        organizationName,
+        adminName,
+        loginEmail: to
+    });
+
+    return sendEmail({
+        to,
+        subject: `Your ${organizationName} CaseSnap admin account is ready`,
+        ...template
+    });
+};
+
 const initializeEmailService = () => {
     if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) {
         console.log('Brevo email service is not fully configured. Required env vars: BREVO_API_KEY and BREVO_SENDER_EMAIL');
@@ -166,5 +277,7 @@ module.exports = {
     sendEmployeeInvitation,
     sendUserInvitation,
     sendPasswordResetEmail,
+    sendCompanyWelcomeEmail,
+    sendSuperAdminWelcomeEmail,
     testEmailConnection
 };
