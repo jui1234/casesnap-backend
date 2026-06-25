@@ -8,7 +8,7 @@ const ErrorResponse = require('../utils/errorResponse');
 const crypto = require('crypto');
 const { sendUserInvitation } = require('../services/emailService');
 const { roleHasAssigneePermission, checkAssigneeLimit, getAssigneePermissionsForRole } = require('../utils/assigneeUtils');
-const { PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE } = require('../middleware/subscriptionLimits');
+const { assigneeLimitExceededMessage } = require('../middleware/subscriptionLimits');
 
 // @desc      Send user invitation
 // @route     POST /api/users/invite
@@ -83,10 +83,10 @@ exports.sendUserInvitation = asyncHandler(async (req, res, next) => {
 
     // Enforce assignee limit for ALL admins including SUPER_ADMIN (invited user will become assignee)
     if (roleHasAssigneePermission(role)) {
-        const { allowed, current, limit } = await checkAssigneeLimit(organizationId, false);
+        const { allowed, current, limit, planName } = await checkAssigneeLimit(organizationId, false);
         if (!allowed) {
             return next(new ErrorResponse(
-                `Assignee limit reached for your plan (${limit} assignee(s), including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
+                assigneeLimitExceededMessage({ planName, limit, current }),
                 400
             ));
         }
@@ -790,10 +790,10 @@ exports.updateUser = asyncHandler(async (req, res, next) => {
             const wasAlreadyAssignee = currentRoleId
                 ? roleHasAssigneePermission(await Role.findById(currentRoleId).select('permissions').lean())
                 : false;
-            const { allowed, current, limit } = await checkAssigneeLimit(organizationId, wasAlreadyAssignee);
+            const { allowed, current, limit, planName } = await checkAssigneeLimit(organizationId, wasAlreadyAssignee);
             if (!allowed) {
                 return next(new ErrorResponse(
-                    `Assignee limit reached for your plan (${limit} assignee(s), including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
+                    assigneeLimitExceededMessage({ planName, limit, current }),
                     400
                 ));
             }

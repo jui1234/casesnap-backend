@@ -8,6 +8,8 @@ const ErrorResponse = require('../utils/errorResponse');
 const { getSubscriptionSummary, normalizePlanName } = require('../utils/subscriptionFeatureUtils');
 
 const PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE = 'Please upgrade to Professional Monthly plan to continue.';
+const FREE_PLAN_ROLE_LIMIT_MESSAGE = 'Free plan allows only 2 roles. Please upgrade to Professional Monthly plan to continue.';
+const FREE_PLAN_ASSIGNEE_LIMIT_MESSAGE = 'Assignee limit reached. Your current plan allows a maximum of 2 assignee roles. Upgrade to the Professional Monthly Plan to add more team members.';
 
 const getOrganizationId = (req) => {
     const org = req.user && req.user.organization;
@@ -17,11 +19,23 @@ const getOrganizationId = (req) => {
 };
 
 const limitExceededMessage = (summary, label, limit) => {
+    if (summary.subscriptionPlan === 'free' && label === 'roles' && limit === 2) {
+        return FREE_PLAN_ROLE_LIMIT_MESSAGE;
+    }
+
     const planLabel = summary.subscriptionLabel || 'Current';
     const upgradeMessage = summary.subscriptionPlan === 'free'
         ? PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE
         : 'Please upgrade your plan to continue.';
     return `${planLabel} plan allows only ${limit} ${label}. ${upgradeMessage}`;
+};
+
+const assigneeLimitExceededMessage = ({ planName, limit, current, label = 'assignee(s)' }) => {
+    if (normalizePlanName(planName) === 'free') {
+        return FREE_PLAN_ASSIGNEE_LIMIT_MESSAGE;
+    }
+
+    return `Assignee limit reached for your plan (${limit} ${label}, including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`;
 };
 
 const getOrganizationForLimitCheck = async (req) => {
@@ -94,6 +108,9 @@ const checkLimit = ({ limitKey, label, countDocuments }) => async (req, res, nex
 };
 
 exports.PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE = PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE;
+exports.FREE_PLAN_ROLE_LIMIT_MESSAGE = FREE_PLAN_ROLE_LIMIT_MESSAGE;
+exports.FREE_PLAN_ASSIGNEE_LIMIT_MESSAGE = FREE_PLAN_ASSIGNEE_LIMIT_MESSAGE;
+exports.assigneeLimitExceededMessage = assigneeLimitExceededMessage;
 
 exports.checkRoleLimit = checkLimit({
     limitKey: 'maxRoles',

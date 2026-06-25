@@ -10,7 +10,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const ErrorResponse = require('../utils/errorResponse');
 const { getSuggestedPriority, validateRoleCreation, validatePermissions, getActionsForModule } = require('../utils/roleUtils');
 const { getAssigneeLimit, getAssigneeRoleCount, roleHasAssigneePermission, checkAssigneeLimit } = require('../utils/assigneeUtils');
-const { PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE } = require('../middleware/subscriptionLimits');
+const { assigneeLimitExceededMessage } = require('../middleware/subscriptionLimits');
 
 const getEffectiveOrganizationPlanName = async (organizationId) => {
     const org = await Organization.findById(organizationId).select('subscriptionPlan').lean();
@@ -97,7 +97,12 @@ exports.createRole = asyncHandler(async (req, res, next) => {
             const currentAssigneeRoleCount = await getAssigneeRoleCount(organizationId);
             if (currentAssigneeRoleCount >= limit) {
                 return next(new ErrorResponse(
-                    `Assignee limit reached for your plan (${limit} assignee role(s), including SUPER_ADMIN). Current: ${currentAssigneeRoleCount}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
+                    assigneeLimitExceededMessage({
+                        planName,
+                        limit,
+                        current: currentAssigneeRoleCount,
+                        label: 'assignee role(s)'
+                    }),
                     400
                 ));
             }
@@ -327,7 +332,12 @@ exports.updateRole = asyncHandler(async (req, res, next) => {
                 const currentAssigneeRoleCount = await getAssigneeRoleCount(organizationId);
                 if (currentAssigneeRoleCount >= limit) {
                     return next(new ErrorResponse(
-                        `Assignee limit reached for your plan (${limit} assignee role(s), including SUPER_ADMIN). Current: ${currentAssigneeRoleCount}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
+                        assigneeLimitExceededMessage({
+                            planName,
+                            limit,
+                            current: currentAssigneeRoleCount,
+                            label: 'assignee role(s)'
+                        }),
                         400
                     ));
                 }
@@ -442,10 +452,10 @@ exports.assignRoleToUser = asyncHandler(async (req, res, next) => {
         const wasAlreadyAssignee = currentRoleId
             ? roleHasAssigneePermission(await Role.findById(currentRoleId).select('permissions').lean())
             : false;
-        const { allowed, current, limit } = await checkAssigneeLimit(organizationId, wasAlreadyAssignee);
+        const { allowed, current, limit, planName } = await checkAssigneeLimit(organizationId, wasAlreadyAssignee);
         if (!allowed) {
             return next(new ErrorResponse(
-                `Assignee limit reached for your plan (${limit} assignee(s), including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`,
+                assigneeLimitExceededMessage({ planName, limit, current }),
                 400
             ));
         }
