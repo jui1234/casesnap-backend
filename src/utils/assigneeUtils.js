@@ -146,7 +146,7 @@ exports.getAssigneeUserIdsForModule = async (organizationId, moduleName) => {
  * Check if adding one more assignee would exceed plan limit
  * @param {string} organizationId
  * @param {boolean} [isAlreadyAssignee] - if the user being added is already an assignee (e.g. role change)
- * @returns {Promise<{ allowed: boolean, current: number, limit: number|null }>}
+ * @returns {Promise<{ allowed: boolean, current: number, limit: number|null, planName: string }>}
  */
 exports.checkAssigneeLimit = async (organizationId, isAlreadyAssignee = false) => {
     const org = await Organization.findById(organizationId).select('subscriptionPlan').lean();
@@ -154,11 +154,11 @@ exports.checkAssigneeLimit = async (organizationId, isAlreadyAssignee = false) =
     const limit = exports.getAssigneeLimit(plan);
     const current = await exports.getCurrentAssigneeCount(organizationId);
     if (limit === null || limit === undefined) {
-        return { allowed: true, current, limit };
+        return { allowed: true, current, limit, planName: plan };
     }
     const effectiveNew = isAlreadyAssignee ? 0 : 1;
     const allowed = current + effectiveNew <= limit;
-    return { allowed, current, limit };
+    return { allowed, current, limit, planName: plan };
 };
 
 /**
