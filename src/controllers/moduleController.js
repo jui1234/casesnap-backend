@@ -13,6 +13,7 @@ const { validateOrganizationSubscription } = require('../utils/subscriptionUtils
 const { getSubscriptionSummary, isFeatureEnabled } = require('../utils/subscriptionFeatureUtils');
 
 const PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE = 'Please upgrade to Professional Monthly plan to continue.';
+const FREE_PLAN_ROLE_LIMIT_MESSAGE = 'Free plan allows only 2 roles. Please upgrade to Professional Monthly plan to continue.';
 
 const getOrganizationId = (user) => {
     const org = user && user.organization;
@@ -57,6 +58,10 @@ const LIMIT_CONFIG = {
 };
 
 const buildLimitMessage = (summary, label, max) => {
+    if (summary.subscriptionPlan === 'free' && label === 'roles' && max === 2) {
+        return FREE_PLAN_ROLE_LIMIT_MESSAGE;
+    }
+
     const planLabel = summary.subscriptionLabel || 'Current';
     const upgradeMessage = summary.subscriptionPlan === 'free'
         ? PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE
