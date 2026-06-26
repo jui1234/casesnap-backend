@@ -9,7 +9,8 @@ const { getSubscriptionSummary, normalizePlanName } = require('../utils/subscrip
 
 const PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE = 'Please upgrade to Professional Monthly plan to continue.';
 const FREE_PLAN_ROLE_LIMIT_MESSAGE = 'Free plan allows only 2 roles. Please upgrade to Professional Monthly plan to continue.';
-const FREE_PLAN_ASSIGNEE_LIMIT_MESSAGE = 'Assignee limit reached. Your current plan allows a maximum of 2 assignee roles. Upgrade to the Professional Monthly Plan to add more team members.';
+const ASSIGNEE_LIMIT_MESSAGE = 'Maximum assignee limit reached.\nUpgrade to the Professional Monthly plan to add more assignees.';
+const FREE_PLAN_ASSIGNEE_LIMIT_MESSAGE = ASSIGNEE_LIMIT_MESSAGE;
 
 const getOrganizationId = (req) => {
     const org = req.user && req.user.organization;
@@ -35,7 +36,7 @@ const assigneeLimitExceededMessage = ({ planName, limit, current, label = 'assig
         return FREE_PLAN_ASSIGNEE_LIMIT_MESSAGE;
     }
 
-    return `Assignee limit reached for your plan (${limit} ${label}, including SUPER_ADMIN). Current assignees: ${current}. ${PROFESSIONAL_MONTHLY_UPGRADE_MESSAGE}`;
+    return ASSIGNEE_LIMIT_MESSAGE;
 };
 
 const getOrganizationForLimitCheck = async (req) => {
