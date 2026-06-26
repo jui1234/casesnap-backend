@@ -388,7 +388,9 @@ exports.forgotPassword = asyncHandler(async (req, res, next) => {
     let account = await User.findOne({ email: normalizedEmail }).select('+resetPasswordToken +resetPasswordExpire');
 
     if (!account) {
-        account = await Employee.findOne({ email: normalizedEmail }).select('+resetPasswordToken +resetPasswordExpire');
+        account = await Employee.findOne({ email: normalizedEmail })
+            .select('+resetPasswordToken +resetPasswordExpire')
+            .populate('organization', 'companyName');
         accountType = 'employee';
     }
 

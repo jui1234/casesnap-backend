@@ -128,25 +128,31 @@ const sendUserInvitation = async (emailData) => {
     });
 };
 
-const sendPasswordResetEmail = async ({ to, fullName, resetLink, organizationName = 'CaseSnap' }) => sendEmail({
-    to,
-    subject: `Reset your ${organizationName} password`,
-    html: `
+const sendPasswordResetEmail = async ({ to, fullName, resetLink, organizationName = 'CaseSnap' }) => {
+    const safeFullName = escapeHtml(fullName || 'User');
+    const safeOrganizationName = escapeHtml(organizationName || 'CaseSnap');
+    const safeResetLink = escapeHtml(resetLink);
+
+    return sendEmail({
+        to,
+        subject: `Reset your ${organizationName || 'CaseSnap'} password`,
+        html: `
         <div style="font-family: system-ui, sans-serif, Arial; font-size: 16px; background-color: #f8fafc; color: #0f172a; padding: 20px;">
           <div style="max-width: 600px; margin: auto; padding: 40px; background-color: #ffffff; border-radius: 12px;">
-            <h2 style="margin-top: 0;">Password Reset Request</h2>
-            <p>Hello ${fullName || 'User'},</p>
+            <h2 style="margin-top: 0;">${safeOrganizationName} Password Reset Request</h2>
+            <p>Hello ${safeFullName},</p>
             <p>We received a request to reset your password. Click the button below to set a new password.</p>
             <p style="text-align: center; margin: 24px 0;">
-              <a href="${resetLink}" target="_blank" style="display: inline-block; text-decoration: none; color: #1f2937; background-color: #facc15; padding: 12px 24px; border-radius: 8px; font-weight: 600;">Reset Password</a>
+              <a href="${safeResetLink}" target="_blank" style="display: inline-block; text-decoration: none; color: #1f2937; background-color: #facc15; padding: 12px 24px; border-radius: 8px; font-weight: 600;">Reset Password</a>
             </p>
             <p style="font-size: 14px; color: #64748b;">This link expires in 15 minutes.</p>
             <p style="font-size: 14px; color: #64748b;">If you did not request this, please ignore this email.</p>
           </div>
         </div>
     `,
-    text: `Hello ${fullName || 'User'},\n\nWe received a request to reset your password.\nReset link: ${resetLink}\n\nThis link expires in 15 minutes.\nIf you did not request this, please ignore this email.`
-});
+        text: `Hello ${fullName || 'User'},\n\nWe received a request to reset your password.\nReset link: ${resetLink}\n\nThis link expires in 15 minutes.\nIf you did not request this, please ignore this email.`
+    });
+};
 
 const buildSetupWelcomeTemplate = ({
     eyebrow,
