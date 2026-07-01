@@ -3,8 +3,8 @@ const Subscription = require('../models/Subscription');
 const User = require('../models/User');
 const { sendSubscriptionExpiredEmail } = require('../services/emailService');
 
-// const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const POLL_INTERVAL_MS = 6000; // 1 minute for testing purposes
+const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+// const POLL_INTERVAL_MS = 6000; // 1 minute for testing purposes
 
 const runSubscriptionExpiryCheck = async () => {
     const now = new Date();
