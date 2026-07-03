@@ -16,6 +16,9 @@ const { loadUserRole, checkPermission } = require('../middleware/rbac');
 // If a valid token is sent, the controller will also mark the current plan.
 router.get('/plans', protectOptional, getSubscriptionPlans);
 
+// Fully public, read-only plan list — never reads/verifies a token, so isCurrentPlan is always false.
+router.get('/plans/public', getSubscriptionPlans);
+
 // Remaining subscription routes require authentication.
 router.use(protectAllowExpiredSuperAdmin);
 
