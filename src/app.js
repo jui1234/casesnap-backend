@@ -23,6 +23,7 @@ const uploadRoutes = require('./routes/uploadRoutes');
 const errorHandler = require('./middleware/error');
 const { initializeEmailService } = require('./services/emailService');
 const { startCaseStageReminderJob } = require('./utils/caseStageReminderJob');
+const { startSubscriptionExpiryJob } = require('./utils/subscriptionExpiryJob');
 const { initializeSubscriptionPlans } = require('./utils/initializeSubscriptionPlans');
 
 const app = express();
@@ -113,6 +114,7 @@ mongoose.connection.once('open', async () => {
     await initializeDefaultModules();
     await initializeSubscriptionPlans();
     startCaseStageReminderJob();
+    startSubscriptionExpiryJob();
 });
 
 // Initialize email service
