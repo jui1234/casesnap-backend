@@ -10,6 +10,7 @@ const runSubscriptionExpiryCheck = async () => {
     const now = new Date();
 
     // Find orgs still on a paid plan whose expiry has passed
+    
     const expiredOrgs = await Organization.find({
         subscriptionPlan: { $ne: 'free' },
         subscriptionExpiresAt: { $ne: null, $lt: now }
