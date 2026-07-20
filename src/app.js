@@ -20,6 +20,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const exampleRoutes = require('./routes/exampleRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
 const errorHandler = require('./middleware/error');
 const { initializeEmailService } = require('./services/emailService');
 const { startCaseStageReminderJob } = require('./utils/caseStageReminderJob');
@@ -136,6 +137,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/example', exampleRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
